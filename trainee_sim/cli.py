@@ -30,7 +30,7 @@ app = typer.Typer(
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Host to bind to (0.0.0.0 so a LAN client can reach it)")] = "0.0.0.0",  # noqa: S104
-    port: Annotated[int, typer.Option(help="Port to bind to")] = 8000,
+    port: Annotated[int, typer.Option(help="Port to bind to")] = 22133,
     reload: Annotated[bool, typer.Option(help="Auto-reload for development")] = False,
 ) -> None:
     """Start the trainee-sim server (holds the live browser session in memory)."""
