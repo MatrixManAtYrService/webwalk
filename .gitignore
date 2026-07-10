@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.direnv/
+.ruff_cache/
+.pytest_cache/
+dist/
+*.egg-info/
+# Local captured telemetry, if TS_DATA_DIR points into the repo during dev.
+captures/
