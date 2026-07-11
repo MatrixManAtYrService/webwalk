@@ -90,6 +90,26 @@ async def session_shutdown() -> dict[str, Any]:
     return {"status": "ok"}
 
 
+# --- windows / tabs ---
+
+
+class SwitchBody(BaseModel):
+    target: str  # index (0,1,…), 'latest'/'first', or a url/title substring
+
+
+@app.get("/session/windows")
+async def session_windows() -> dict[str, Any]:
+    return await SESSION.windows()
+
+
+@app.post("/session/switch")
+async def session_switch(body: SwitchBody) -> dict[str, Any]:
+    try:
+        return await SESSION.switch(body.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
 # --- telemetry gate ---
 
 
@@ -105,6 +125,7 @@ async def telemetry(state: str) -> dict[str, Any]:
 
 class ObserveBody(BaseModel):
     label: str = "observe"
+    window: str | None = None
 
 
 class StepBody(BaseModel):
@@ -112,18 +133,29 @@ class StepBody(BaseModel):
     selector: str | None = None
     value: str | None = None
     label: str | None = None
+    window: str | None = None
 
 
 @app.post("/observe")
 async def observe(body: ObserveBody | None = None) -> dict[str, Any]:
-    return await SESSION.observe(label=body.label if body else "observe")
+    try:
+        return await SESSION.observe(
+            label=body.label if body else "observe",
+            window=body.window if body else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
 @app.post("/step")
 async def step(body: StepBody) -> dict[str, Any]:
     try:
         return await SESSION.act(
-            action=body.action, selector=body.selector, value=body.value, label=body.label
+            action=body.action,
+            selector=body.selector,
+            value=body.value,
+            label=body.label,
+            window=body.window,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})

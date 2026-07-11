@@ -117,6 +117,71 @@ class BrowserSession:
                 logger.warning("driver_quit_failed", error=str(exc))
             self._driver = None
 
+    # --- windows / tabs ---
+    #
+    # Selenium only ever "sees" the one window it is focused on. New tabs (e.g. a
+    # "launch course" button that opens the course in a second tab) are NOT
+    # followed automatically — the driver stays put. So observing/acting on the
+    # right tab means listing the open windows and switching focus explicitly.
+
+    def _list_windows_sync(self, driver: WebDriver) -> list[dict[str, Any]]:
+        """Enumerate all open windows (url/title/active), leaving focus unchanged."""
+        original = driver.current_window_handle
+        out: list[dict[str, Any]] = []
+        for i, handle in enumerate(driver.window_handles):
+            driver.switch_to.window(handle)
+            out.append(
+                {
+                    "index": i,
+                    "url": driver.current_url,
+                    "title": driver.title,
+                    "active": handle == original,
+                }
+            )
+        driver.switch_to.window(original)  # restore focus; enumeration is side-effect-free
+        return out
+
+    async def windows(self) -> dict[str, Any]:
+        driver = self._require()
+        windows = await asyncio.to_thread(self._list_windows_sync, driver)
+        return {"windows": windows, "count": len(windows)}
+
+    def _switch_sync(self, driver: WebDriver, target: str) -> dict[str, Any]:
+        """Focus a window by index, 'latest'/'first', or url/title substring."""
+        handles = driver.window_handles
+        chosen: str | None = None
+        if target == "latest":
+            chosen = handles[-1]
+        elif target == "first":
+            chosen = handles[0]
+        elif target.lstrip("-").isdigit():
+            idx = int(target)
+            if not -len(handles) <= idx < len(handles):
+                raise ValueError(f"window index {idx} out of range (0..{len(handles) - 1})")
+            chosen = handles[idx]
+        else:
+            needle = target.lower()
+            for handle in handles:
+                driver.switch_to.window(handle)
+                if needle in (driver.current_url or "").lower() or needle in (driver.title or "").lower():
+                    chosen = handle
+                    break
+            if chosen is None:
+                raise ValueError(f"no open window matching {target!r} by url or title")
+        driver.switch_to.window(chosen)
+        return {
+            "handle": chosen,
+            "index": handles.index(chosen),
+            "url": driver.current_url,
+            "title": driver.title,
+        }
+
+    async def switch(self, target: str) -> dict[str, Any]:
+        driver = self._require()
+        result = await asyncio.to_thread(self._switch_sync, driver, target)
+        logger.info("window_switched", index=result["index"], url=result["url"])
+        return {"status": "ok", **result}
+
     # --- telemetry gate ---
 
     async def set_telemetry(self, on: bool) -> dict[str, Any]:
@@ -158,14 +223,22 @@ class BrowserSession:
             "title": driver.title,
             "elements": elements,
             "dom": driver.page_source,
+            # Record the whole window set with each step, so a capture shows what
+            # other tabs were open (and which one this snapshot is of).
+            "windows": self._list_windows_sync(driver),
         }
 
     async def snapshot(self) -> dict[str, Any]:
         driver = self._require()
         return await asyncio.to_thread(self._snapshot_sync, driver)
 
-    async def observe(self, label: str = "observe") -> dict[str, Any]:
-        """Record the current browser state as one step (if telemetry is on)."""
+    async def observe(self, label: str = "observe", window: str | None = None) -> dict[str, Any]:
+        """Record the current browser state as one step (if telemetry is on).
+
+        If `window` is given, switch focus to it first (index/'latest'/substring).
+        """
+        if window is not None:
+            await self.switch(window)
         state = await self.snapshot()
         path = self.capture.record(label, {"state": state})
         return _step_summary(path, self.capture.enabled, state)
@@ -202,13 +275,17 @@ class BrowserSession:
         selector: str | None = None,
         value: str | None = None,
         label: str | None = None,
+        window: str | None = None,
     ) -> dict[str, Any]:
         """Inject an action, capturing before/after state as one step.
 
         The before/after pair is exactly the raw material for authoring a rule:
-        "in this state I did X, and it moved me to that state."
+        "in this state I did X, and it moved me to that state." If `window` is
+        given, switch focus to it before acting.
         """
         driver = self._require()
+        if window is not None:
+            await asyncio.to_thread(self._switch_sync, driver, window)
         before = await self.snapshot()
         result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value)
         after = await self.snapshot()

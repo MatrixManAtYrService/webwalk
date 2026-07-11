@@ -102,11 +102,32 @@ def status() -> None:
 
 
 @app.command()
+def windows() -> None:
+    """List open browser windows/tabs (index, url, title, which is active).
+
+    Selenium only sees the focused window, so a "launch course" button that
+    opens a new tab won't be observed until you `switch` to it.
+    """
+    _request("/session/windows", method="GET")
+
+
+@app.command()
+def switch(
+    target: Annotated[
+        str, typer.Argument(help="Window to focus: an index (0,1,…), 'latest', 'first', or a url/title substring")
+    ],
+) -> None:
+    """Switch the driver's focus to another window/tab."""
+    _request("/session/switch", json={"target": target})
+
+
+@app.command()
 def observe(
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "observe",
+    window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
 ) -> None:
     """Capture the current browser state as one step (only if telemetry is on)."""
-    _request("/observe", json={"label": label})
+    _request("/observe", json={"label": label, "window": window or None})
 
 
 @app.command()
@@ -115,6 +136,7 @@ def step(
     selector: Annotated[str, typer.Option(help="CSS selector (for click/type)")] = "",
     value: Annotated[str, typer.Option(help="Text to type, or URL to navigate to")] = "",
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "",
+    window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
 ) -> None:
     """Inject an action and capture before/after state as one step.
 
@@ -131,6 +153,7 @@ def step(
             "selector": selector or None,
             "value": value or None,
             "label": label or None,
+            "window": window or None,
         },
     )
 
