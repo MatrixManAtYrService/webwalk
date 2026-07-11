@@ -136,6 +136,7 @@ class StepBody(BaseModel):
     window: str | None = None
     by: str = "css"  # css | xpath
     secret: bool = False  # redact the value everywhere it is recorded
+    frame: str | None = None  # nested-frame path, e.g. "0" or "0/1"
 
 
 class WaitBody(BaseModel):
@@ -144,6 +145,7 @@ class WaitBody(BaseModel):
     by: str = "css"
     timeout: float = 30.0
     window: str | None = None
+    frame: str | None = None
 
 
 @app.post("/observe")
@@ -168,6 +170,7 @@ async def step(body: StepBody) -> dict[str, Any]:
             window=body.window,
             by=body.by,
             secret=body.secret,
+            frame=body.frame,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
@@ -182,6 +185,7 @@ async def wait(body: WaitBody) -> dict[str, Any]:
             by=body.by,
             timeout=body.timeout,
             window=body.window,
+            frame=body.frame,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})

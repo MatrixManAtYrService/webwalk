@@ -189,6 +189,7 @@ def step(
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
     by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
+    frame: Annotated[str, typer.Option(help="Target an element inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
     save: Annotated[bool, typer.Option(help="Save the full capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Inject an action and capture before/after state.
@@ -210,6 +211,7 @@ def step(
             "label": label or None,
             "by": by,
             "window": window or None,
+            "frame": frame or None,
         },
     )
 
@@ -221,6 +223,7 @@ def wait_for(
     by: Annotated[str, typer.Option(help="Selector type for --element: css or xpath")] = "css",
     timeout: Annotated[float, typer.Option(help="Seconds to wait before giving up")] = 30.0,
     window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+    frame: Annotated[str, typer.Option(help="Look for --element inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
 ) -> None:
     """Block until the page reaches a URL and/or shows an element (or times out).
 
@@ -234,7 +237,14 @@ def wait_for(
     """
     result = _call(
         "/wait",
-        json={"url": url or None, "element": element or None, "by": by, "timeout": timeout, "window": window or None},
+        json={
+            "url": url or None,
+            "element": element or None,
+            "by": by,
+            "timeout": timeout,
+            "window": window or None,
+            "frame": frame or None,
+        },
     )
     typer.echo(json.dumps(result, indent=2, default=str))
     if not result.get("matched"):
@@ -250,6 +260,7 @@ def type(  # noqa: A001 — the CLI verb really is "type"
     secret: Annotated[bool, typer.Option(help="Redact the value everywhere it's recorded (use for passwords)")] = False,
     label: Annotated[str, typer.Option(help="Short label for this step")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+    frame: Annotated[str, typer.Option(help="Type into a field inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
     save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Type text into a field (a friendlier `step type`).
@@ -278,6 +289,7 @@ def type(  # noqa: A001 — the CLI verb really is "type"
             "secret": secret,
             "label": label or ("type-secret" if secret else None),
             "window": window or None,
+            "frame": frame or None,
         },
     )
 
@@ -288,6 +300,7 @@ def click(
     by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
     label: Annotated[str, typer.Option(help="Short label for this step")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+    frame: Annotated[str, typer.Option(help="Click an element inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
     save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Click an element (a friendlier `step click`).
@@ -296,6 +309,7 @@ def click(
     Examples:
         trainee-sim click --element "input#idSIButton9"
         trainee-sim click --by xpath --element "//button[contains(.,'Launch')]"
+        trainee-sim click --frame 0 --element "button.next"   # inside the first iframe
     """
     if not element:
         typer.echo("Which element? Pass --element with a selector.", err=True)
@@ -303,7 +317,14 @@ def click(
     _request_capturing(
         "/step",
         save=save,
-        json={"action": "click", "selector": element, "by": by, "label": label or None, "window": window or None},
+        json={
+            "action": "click",
+            "selector": element,
+            "by": by,
+            "label": label or None,
+            "window": window or None,
+            "frame": frame or None,
+        },
     )
 
 

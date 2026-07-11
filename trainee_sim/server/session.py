@@ -267,13 +267,54 @@ class BrowserSession:
             self.capture.disable()
         return {"status": "ok", "telemetry": self.capture.enabled}
 
-    # --- observation ---
+    # --- frames / iframes ---
+    #
+    # Selenium only sees the document it is currently switched into; a course
+    # player renders its content inside (often nested) iframes, invisible until
+    # you switch_to.frame. A "frame path" is a list of integer indices — each is
+    # a position in that document's `iframe, frame` list. Collection and
+    # re-entry both resolve indices through the same query, so the path observe
+    # reports is exactly what click/type/wait-for take.
 
-    def _snapshot_sync(self, driver: WebDriver) -> dict[str, Any]:
-        """Capture the page state rules will eventually match on."""
+    FRAME_TAGS = "iframe, frame"
+    MAX_FRAME_DEPTH = 5
+
+    @staticmethod
+    def _parse_frame(frame: Any) -> list[Any]:
+        """Normalize a frame path: a list, or a '/'-joined string of index/CSS."""
+        if frame is None:
+            return []
+        if isinstance(frame, list):
+            return frame
+        return [int(s) if s.lstrip("-").isdigit() else s for s in str(frame).split("/") if s]
+
+    def _enter_frame_path(self, driver: WebDriver, frame: list[Any]) -> None:
+        """Switch from the top document down into the nested frame path."""
         from selenium.webdriver.common.by import By
 
-        elements: list[dict[str, Any]] = []
+        driver.switch_to.default_content()
+        for seg in frame:
+            if isinstance(seg, int) or (isinstance(seg, str) and seg.lstrip("-").isdigit()):
+                frames = driver.find_elements(By.CSS_SELECTOR, self.FRAME_TAGS)
+                driver.switch_to.frame(frames[int(seg)])
+            else:
+                driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, seg))
+
+    # --- observation ---
+
+    def _collect_elements(
+        self, driver: WebDriver, frame_path: list[int], elements: list[dict[str, Any]], frames: list[dict[str, Any]], depth: int
+    ) -> None:
+        """Append this frame's interactive elements (tagged with frame_path),
+        then recurse into child frames."""
+        from selenium.webdriver.common.by import By
+
+        if frame_path:
+            try:
+                frames.append({"frame": list(frame_path), "url": driver.current_url})
+            except Exception:
+                frames.append({"frame": list(frame_path), "url": None})
+
         for tag in ("button", "a", "input", "select", "textarea"):
             for el in driver.find_elements(By.TAG_NAME, tag):
                 try:
@@ -289,16 +330,39 @@ class BrowserSession:
                             "name": el.get_attribute("name"),
                             "aria_label": el.get_attribute("aria-label"),
                             "href": el.get_attribute("href") if tag == "a" else None,
+                            "frame": list(frame_path),  # [] = top document
                         }
                     )
                 except Exception:
-                    # Elements can go stale mid-scan; skip and keep going.
-                    continue
+                    continue  # element went stale mid-scan; keep going
+
+        if depth >= self.MAX_FRAME_DEPTH:
+            return
+        child_count = len(driver.find_elements(By.CSS_SELECTOR, self.FRAME_TAGS))
+        for idx in range(child_count):
+            try:
+                children = driver.find_elements(By.CSS_SELECTOR, self.FRAME_TAGS)
+                driver.switch_to.frame(children[idx])
+            except Exception:
+                # Couldn't enter (cross-origin quirk, stale) — recover and skip.
+                self._enter_frame_path(driver, frame_path)
+                continue
+            self._collect_elements(driver, [*frame_path, idx], elements, frames, depth + 1)
+            driver.switch_to.parent_frame()
+
+    def _snapshot_sync(self, driver: WebDriver) -> dict[str, Any]:
+        """Capture page state — including elements inside (nested) iframes."""
+        driver.switch_to.default_content()
+        elements: list[dict[str, Any]] = []
+        frames: list[dict[str, Any]] = []
+        self._collect_elements(driver, [], elements, frames, depth=0)
+        driver.switch_to.default_content()
         return {
             "url": driver.current_url,
             "title": driver.title,
             "elements": elements,
-            "dom": driver.page_source,
+            "frames": frames,  # the nested-frame map (empty if the page has none)
+            "dom": driver.page_source,  # top document only (frames listed above)
             # Record the whole window set with each step, so a capture shows what
             # other tabs were open (and which one this snapshot is of).
             "windows": self._list_windows_sync(driver),
@@ -326,7 +390,14 @@ class BrowserSession:
     # --- waiting (for scripted flows) ---
 
     def _wait_sync(
-        self, driver: WebDriver, url_contains: str | None, selector: str | None, by: str, timeout: float, poll: float
+        self,
+        driver: WebDriver,
+        url_contains: str | None,
+        selector: str | None,
+        by: str,
+        frame: list[Any],
+        timeout: float,
+        poll: float,
     ) -> dict[str, Any]:
         import time
 
@@ -339,16 +410,19 @@ class BrowserSession:
             if not self._focus_live_window(driver):
                 return {"matched": False, "error": "browser_closed", "url": last_url}
             try:
-                last_url = driver.current_url
+                driver.switch_to.default_content()
+                last_url = driver.current_url  # url is always the top document's
                 ok = True
                 if url_contains and url_contains.lower() not in (last_url or "").lower():
                     ok = False
-                if ok and selector and not any(e.is_displayed() for e in driver.find_elements(locator, selector)):
-                    ok = False
+                if ok and selector:
+                    self._enter_frame_path(driver, frame)  # look inside the target frame
+                    ok = any(e.is_displayed() for e in driver.find_elements(locator, selector))
+                    driver.switch_to.default_content()
                 if ok:
                     return {"matched": True, "url": last_url}
             except Exception:
-                pass  # page mid-navigation; keep polling
+                pass  # page mid-navigation / frame not ready; keep polling
             if time.monotonic() >= deadline:
                 return {"matched": False, "url": last_url}
             time.sleep(poll)
@@ -360,28 +434,37 @@ class BrowserSession:
         by: str = "css",
         timeout: float = 30.0,
         window: str | None = None,
+        frame: Any = None,
     ) -> dict[str, Any]:
         """Block until the focused page's url contains `url` and/or `element` is
-        visible, or until `timeout`. Lets a scripted login wait out redirects."""
+        visible (optionally inside `frame`), or until `timeout`."""
         if not url and not element:
             raise ValueError("wait-for needs --url and/or --element")
         driver = await self._ready()
         if window is not None:
             await asyncio.to_thread(self._switch_sync, driver, window)
-        result = await asyncio.to_thread(self._wait_sync, driver, url, element, by, timeout, 0.5)
+        result = await asyncio.to_thread(
+            self._wait_sync, driver, url, element, by, self._parse_frame(frame), timeout, 0.5
+        )
         return {"status": "ok", **result}
 
     # --- action ---
 
     def _perform_sync(
-        self, driver: WebDriver, action: str, selector: str | None, value: str | None, by: str = "css"
+        self,
+        driver: WebDriver,
+        action: str,
+        selector: str | None,
+        value: str | None,
+        by: str = "css",
+        frame: list[Any] | None = None,
     ) -> dict[str, Any]:
         from selenium.webdriver.common.by import By
 
         if action == "navigate":
             if not value:
                 raise ValueError("navigate requires a value (the URL)")
-            driver.get(value)
+            driver.get(value)  # always loads the top document
             return {"action": "navigate", "url": value}
 
         if selector is None:
@@ -389,16 +472,21 @@ class BrowserSession:
         locator = {"css": By.CSS_SELECTOR, "xpath": By.XPATH}.get(by)
         if locator is None:
             raise ValueError(f"unknown selector type {by!r} (use css or xpath)")
-        el = driver.find_element(locator, selector)
 
-        if action == "click":
-            el.click()
-            return {"action": "click", "by": by, "selector": selector}
-        if action == "type":
-            el.clear()
-            el.send_keys(value or "")
-            return {"action": "type", "by": by, "selector": selector}
-        raise ValueError(f"Unknown action: {action!r} (use click, type, or navigate)")
+        # Descend into the target frame (if any), act, then always return to top.
+        self._enter_frame_path(driver, frame or [])
+        try:
+            el = driver.find_element(locator, selector)
+            if action == "click":
+                el.click()
+                return {"action": "click", "by": by, "selector": selector, "frame": frame or []}
+            if action == "type":
+                el.clear()
+                el.send_keys(value or "")
+                return {"action": "type", "by": by, "selector": selector, "frame": frame or []}
+            raise ValueError(f"Unknown action: {action!r} (use click, type, or navigate)")
+        finally:
+            driver.switch_to.default_content()
 
     async def act(
         self,
@@ -409,6 +497,7 @@ class BrowserSession:
         window: str | None = None,
         by: str = "css",
         secret: bool = False,
+        frame: Any = None,
     ) -> dict[str, Any]:
         """Inject an action, capturing before/after state as one step.
 
@@ -416,14 +505,15 @@ class BrowserSession:
         "in this state I did X, and it moved me to that state." If `window` is
         given, switch focus to it before acting. `by` selects css (default) or
         xpath, so a button can be targeted by visible text when it has no id.
-        When `secret`, the typed value is redacted everywhere it is recorded
-        (server capture + the payload returned to the client) — for passwords.
+        `frame` targets an element inside a (nested) iframe. When `secret`, the
+        typed value is redacted everywhere it is recorded (server capture + the
+        payload returned to the client) — for passwords.
         """
         driver = await self._ready()
         if window is not None:
             await asyncio.to_thread(self._switch_sync, driver, window)
         before = await self.snapshot()
-        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by)
+        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by, self._parse_frame(frame))
         after = await self.snapshot()
         step_label = label or f"{action}-{selector or ''}"
         record = {
