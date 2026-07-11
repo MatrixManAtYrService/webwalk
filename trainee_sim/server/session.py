@@ -59,7 +59,10 @@ class BrowserSession:
         if SETTINGS.webdriver_url:
             logger.info("connecting_remote_webdriver", url=SETTINGS.webdriver_url)
             return webdriver.Remote(command_executor=SETTINGS.webdriver_url, options=options)
-        logger.info("launching_local_chrome")
+        # Reuse a persistent profile so cookies/device-trust survive restarts and
+        # we don't re-run the whole login every time the server bounces.
+        options.add_argument(f"--user-data-dir={SETTINGS.browser_profile_dir}")
+        logger.info("launching_local_chrome", profile=str(SETTINGS.browser_profile_dir))
         return webdriver.Chrome(options=options)
 
     def _driver_alive(self, driver: WebDriver) -> bool:
@@ -320,6 +323,54 @@ class BrowserSession:
         summary["record"] = {"label": label, "state": state}
         return summary
 
+    # --- waiting (for scripted flows) ---
+
+    def _wait_sync(
+        self, driver: WebDriver, url_contains: str | None, selector: str | None, by: str, timeout: float, poll: float
+    ) -> dict[str, Any]:
+        import time
+
+        from selenium.webdriver.common.by import By
+
+        locator = {"css": By.CSS_SELECTOR, "xpath": By.XPATH}.get(by, By.CSS_SELECTOR)
+        deadline = time.monotonic() + timeout
+        last_url: str | None = None
+        while True:
+            if not self._focus_live_window(driver):
+                return {"matched": False, "error": "browser_closed", "url": last_url}
+            try:
+                last_url = driver.current_url
+                ok = True
+                if url_contains and url_contains.lower() not in (last_url or "").lower():
+                    ok = False
+                if ok and selector and not any(e.is_displayed() for e in driver.find_elements(locator, selector)):
+                    ok = False
+                if ok:
+                    return {"matched": True, "url": last_url}
+            except Exception:
+                pass  # page mid-navigation; keep polling
+            if time.monotonic() >= deadline:
+                return {"matched": False, "url": last_url}
+            time.sleep(poll)
+
+    async def wait_for(
+        self,
+        url: str | None = None,
+        element: str | None = None,
+        by: str = "css",
+        timeout: float = 30.0,
+        window: str | None = None,
+    ) -> dict[str, Any]:
+        """Block until the focused page's url contains `url` and/or `element` is
+        visible, or until `timeout`. Lets a scripted login wait out redirects."""
+        if not url and not element:
+            raise ValueError("wait-for needs --url and/or --element")
+        driver = await self._ready()
+        if window is not None:
+            await asyncio.to_thread(self._switch_sync, driver, window)
+        result = await asyncio.to_thread(self._wait_sync, driver, url, element, by, timeout, 0.5)
+        return {"status": "ok", **result}
+
     # --- action ---
 
     def _perform_sync(
@@ -357,6 +408,7 @@ class BrowserSession:
         label: str | None = None,
         window: str | None = None,
         by: str = "css",
+        secret: bool = False,
     ) -> dict[str, Any]:
         """Inject an action, capturing before/after state as one step.
 
@@ -364,6 +416,8 @@ class BrowserSession:
         "in this state I did X, and it moved me to that state." If `window` is
         given, switch focus to it before acting. `by` selects css (default) or
         xpath, so a button can be targeted by visible text when it has no id.
+        When `secret`, the typed value is redacted everywhere it is recorded
+        (server capture + the payload returned to the client) — for passwords.
         """
         driver = await self._ready()
         if window is not None:
@@ -371,10 +425,15 @@ class BrowserSession:
         before = await self.snapshot()
         result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by)
         after = await self.snapshot()
-        step_label = label or f"{action}-{selector or value or ''}"
+        step_label = label or f"{action}-{selector or ''}"
         record = {
             "label": step_label,
-            "action": {"action": action, "by": by, "selector": selector, "value": value},
+            "action": {
+                "action": action,
+                "by": by,
+                "selector": selector,
+                "value": "<redacted>" if secret else value,
+            },
             "result": result,
             "before": before,
             "after": after,

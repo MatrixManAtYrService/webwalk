@@ -43,9 +43,16 @@ class Settings:
     def captures_dir(self) -> Path:
         return self.data_dir / "captures"
 
+    @property
+    def browser_profile_dir(self) -> Path:
+        """Persistent Chrome profile, so the login/session survives restarts."""
+        override = os.environ.get("TS_BROWSER_PROFILE")
+        return Path(override).expanduser() if override else self.data_dir / "browser-profile"
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.captures_dir.mkdir(parents=True, exist_ok=True)
+        self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
 
 
 SETTINGS = Settings()

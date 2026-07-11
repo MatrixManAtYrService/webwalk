@@ -1,7 +1,10 @@
 """trainee-sim CLI — a stateless front-end to the trainee-sim server.
 
   trainee-sim serve            start the server (holds the live browser session)
-  trainee-sim connect          open the browser at the training entry point
+  trainee-sim connect [url]    open the browser at a URL (session persists)
+  trainee-sim wait-for         block until a URL/element appears (scripted login)
+  trainee-sim type … --into    type into a field (--secret for passwords)
+  trainee-sim click --element  click an element
   trainee-sim telemetry on|off gate the observer (OFF during manual auth)
   trainee-sim status           connection + telemetry state
   trainee-sim observe          capture the current browser state as a step
@@ -97,25 +100,33 @@ def _save_capture(record: dict[str, Any]) -> str:
     return str(path)
 
 
-def _request_capturing(path: str, **kwargs) -> None:
-    """Make an observe/step request: save the full record locally, print a summary."""
+def _request_capturing(path: str, save: bool = False, **kwargs) -> None:
+    """Make an observe/step request and print a summary.
+
+    The full record is saved locally to ./data/ only when telemetry is on
+    (`recorded`) or `--save` is passed — so a telemetry-off login flow, incl.
+    the password step, writes nothing to disk by default.
+    """
     result = _call(path, **kwargs)
     record = result.pop("record", None)
-    if record is not None:
+    if record is not None and (save or result.get("recorded")):
         result["local_path"] = _save_capture(record)
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
 @app.command()
 def connect(
-    start_url: Annotated[str, typer.Option(help="Override the training entry-point URL")] = "",
+    url: Annotated[str, typer.Argument(help="URL to open (defaults to TS_START_URL)")] = "",
 ) -> None:
-    """Open the browser on the server and navigate to the training entry point.
+    """Open the browser on the server and navigate to a URL.
 
     Telemetry stays OFF: complete login/MFA and load the training in the headed
     window, then run `trainee-sim telemetry on` before capturing anything.
+
+    The browser profile persists across restarts, so once you've logged in the
+    session is usually remembered and connect drops you straight in.
     """
-    _request("/session/connect", json={"start_url": start_url or None})
+    _request("/session/connect", json={"start_url": url or None})
 
 
 @app.command()
@@ -159,14 +170,15 @@ def switch(
 def observe(
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "observe",
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
+    save: Annotated[bool, typer.Option(help="Save the full capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
-    """Capture the current browser state and save it locally to ./data/.
+    """Capture the current browser state; a compact summary prints to stdout.
 
     The full page state (elements, DOM, open windows) is written to
-    ./data/captures/ so it's readable here; a compact summary prints to stdout.
-    (Server-side persistence still only happens while telemetry is on.)
+    ./data/captures/ when telemetry is on, or when you pass --save (for
+    inspection during a telemetry-off login flow).
     """
-    _request_capturing("/observe", json={"label": label, "window": window or None})
+    _request_capturing("/observe", save=save, json={"label": label, "window": window or None})
 
 
 @app.command()
@@ -177,8 +189,9 @@ def step(
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
     by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
+    save: Annotated[bool, typer.Option(help="Save the full capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
-    """Inject an action and capture before/after state (saved to ./data/).
+    """Inject an action and capture before/after state.
 
     \b
     Examples:
@@ -189,6 +202,7 @@ def step(
     """
     _request_capturing(
         "/step",
+        save=save,
         json={
             "action": action,
             "selector": selector or None,
@@ -197,6 +211,99 @@ def step(
             "by": by,
             "window": window or None,
         },
+    )
+
+
+@app.command(name="wait-for")
+def wait_for(
+    url: Annotated[str, typer.Option(help="Wait until the page URL contains this substring")] = "",
+    element: Annotated[str, typer.Option(help="Wait until this selector is visible")] = "",
+    by: Annotated[str, typer.Option(help="Selector type for --element: css or xpath")] = "css",
+    timeout: Annotated[float, typer.Option(help="Seconds to wait before giving up")] = 30.0,
+    window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+) -> None:
+    """Block until the page reaches a URL and/or shows an element (or times out).
+
+    Lets a scripted login ride out redirects. Exits non-zero on timeout, so a
+    recalled chain of commands stops if a step never appears.
+
+    \b
+    Examples:
+        trainee-sim wait-for --url login.microsoftonline.com
+        trainee-sim wait-for --element "input#i0116"
+    """
+    result = _call(
+        "/wait",
+        json={"url": url or None, "element": element or None, "by": by, "timeout": timeout, "window": window or None},
+    )
+    typer.echo(json.dumps(result, indent=2, default=str))
+    if not result.get("matched"):
+        raise typer.Exit(1)
+
+
+@app.command()
+def type(  # noqa: A001 — the CLI verb really is "type"
+    value: Annotated[str, typer.Argument(help="Text to type (omit if using --env)")] = "",
+    into: Annotated[str, typer.Option("--into", help="Selector of the field to type into")] = "",
+    by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
+    env: Annotated[str, typer.Option(help="Read the value from this env var instead (keeps it out of shell history)")] = "",
+    secret: Annotated[bool, typer.Option(help="Redact the value everywhere it's recorded (use for passwords)")] = False,
+    label: Annotated[str, typer.Option(help="Short label for this step")] = "",
+    window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+    save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
+) -> None:
+    """Type text into a field (a friendlier `step type`).
+
+    \b
+    Examples:
+        trainee-sim type Firstname.Lastname@Fiserv.com --into "input#i0116"
+        trainee-sim type --into "input[type=password]" --env TS_PW --secret
+    """
+    if env:
+        value = os.environ.get(env, "")
+        if not value:
+            typer.echo(f"Env var {env!r} is empty or unset.", err=True)
+            raise typer.Exit(1)
+    if not into:
+        typer.echo("Which field? Pass --into with a selector.", err=True)
+        raise typer.Exit(1)
+    _request_capturing(
+        "/step",
+        save=save,
+        json={
+            "action": "type",
+            "selector": into,
+            "value": value,
+            "by": by,
+            "secret": secret,
+            "label": label or ("type-secret" if secret else None),
+            "window": window or None,
+        },
+    )
+
+
+@app.command()
+def click(
+    element: Annotated[str, typer.Option("--element", help="Selector of the element to click")] = "",
+    by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
+    label: Annotated[str, typer.Option(help="Short label for this step")] = "",
+    window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+    save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
+) -> None:
+    """Click an element (a friendlier `step click`).
+
+    \b
+    Examples:
+        trainee-sim click --element "input#idSIButton9"
+        trainee-sim click --by xpath --element "//button[contains(.,'Launch')]"
+    """
+    if not element:
+        typer.echo("Which element? Pass --element with a selector.", err=True)
+        raise typer.Exit(1)
+    _request_capturing(
+        "/step",
+        save=save,
+        json={"action": "click", "selector": element, "by": by, "label": label or None, "window": window or None},
     )
 
 

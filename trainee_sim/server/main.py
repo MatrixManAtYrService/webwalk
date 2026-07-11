@@ -135,6 +135,15 @@ class StepBody(BaseModel):
     label: str | None = None
     window: str | None = None
     by: str = "css"  # css | xpath
+    secret: bool = False  # redact the value everywhere it is recorded
+
+
+class WaitBody(BaseModel):
+    url: str | None = None
+    element: str | None = None
+    by: str = "css"
+    timeout: float = 30.0
+    window: str | None = None
 
 
 @app.post("/observe")
@@ -158,6 +167,21 @@ async def step(body: StepBody) -> dict[str, Any]:
             label=body.label,
             window=body.window,
             by=body.by,
+            secret=body.secret,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.post("/wait")
+async def wait(body: WaitBody) -> dict[str, Any]:
+    try:
+        return await SESSION.wait_for(
+            url=body.url,
+            element=body.element,
+            by=body.by,
+            timeout=body.timeout,
+            window=body.window,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
