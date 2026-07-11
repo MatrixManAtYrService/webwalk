@@ -134,6 +134,7 @@ class StepBody(BaseModel):
     value: str | None = None
     label: str | None = None
     window: str | None = None
+    by: str = "css"  # css | xpath
 
 
 @app.post("/observe")
@@ -156,6 +157,7 @@ async def step(body: StepBody) -> dict[str, Any]:
             value=body.value,
             label=body.label,
             window=body.window,
+            by=body.by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})

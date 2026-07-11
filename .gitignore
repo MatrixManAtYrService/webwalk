@@ -8,3 +8,5 @@ dist/
 *.egg-info/
 # Local captured telemetry, if TS_DATA_DIR points into the repo during dev.
 captures/
+# Client-side captures fetched by observe/step (TS_LOCAL_DATA_DIR, default ./data).
+data/

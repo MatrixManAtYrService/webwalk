@@ -15,11 +15,17 @@ TS_SERVER_URL (default http://localhost:22133).
 from __future__ import annotations
 
 import json
-from typing import Annotated
+import os
+from pathlib import Path
+from typing import Annotated, Any
 
 import typer
 
 from trainee_sim.constants import DEFAULT_PORT
+
+# Where fetched captures land on THIS (client) machine, so they're easy to read
+# regardless of where the server/browser lives. Overridable for scripting.
+LOCAL_DATA_DIR = Path(os.environ.get("TS_LOCAL_DATA_DIR", "./data"))
 
 app = typer.Typer(
     help="trainee-sim — drive a Selenium browser through training material and capture the flow.\n\n"
@@ -60,15 +66,43 @@ def check(timeout: Annotated[float, typer.Option(help="Seconds to wait")] = 5.0)
         raise typer.Exit(1)
 
 
-def _request(path: str, **kwargs) -> None:
-    """Run a server request and print the JSON result, with a friendly error."""
+def _call(path: str, **kwargs) -> dict[str, Any]:
+    """Make a server request, returning the JSON result (friendly error on down)."""
     from trainee_sim.client import ServerUnreachable, server_request
 
     try:
-        result = server_request(path, **kwargs)
+        return server_request(path, **kwargs)
     except ServerUnreachable as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
+
+
+def _request(path: str, **kwargs) -> None:
+    """Make a server request and print the JSON result."""
+    typer.echo(json.dumps(_call(path, **kwargs), indent=2, default=str))
+
+
+def _save_capture(record: dict[str, Any]) -> str:
+    """Write a fetched capture record to ./data/captures/, numbered + slugified."""
+    from trainee_sim.server.capture import slugify
+
+    captures = LOCAL_DATA_DIR / "captures"
+    captures.mkdir(parents=True, exist_ok=True)
+    seq = 1 + max(
+        (int(p.stem.split("-", 1)[0]) for p in captures.glob("*.json") if p.stem.split("-", 1)[0].isdigit()),
+        default=0,
+    )
+    path = captures / f"{seq:05d}-{slugify(record.get('label', 'step'))}.json"
+    path.write_text(json.dumps(record, indent=2, default=str))
+    return str(path)
+
+
+def _request_capturing(path: str, **kwargs) -> None:
+    """Make an observe/step request: save the full record locally, print a summary."""
+    result = _call(path, **kwargs)
+    record = result.pop("record", None)
+    if record is not None:
+        result["local_path"] = _save_capture(record)
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
@@ -126,33 +160,41 @@ def observe(
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "observe",
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
 ) -> None:
-    """Capture the current browser state as one step (only if telemetry is on)."""
-    _request("/observe", json={"label": label, "window": window or None})
+    """Capture the current browser state and save it locally to ./data/.
+
+    The full page state (elements, DOM, open windows) is written to
+    ./data/captures/ so it's readable here; a compact summary prints to stdout.
+    (Server-side persistence still only happens while telemetry is on.)
+    """
+    _request_capturing("/observe", json={"label": label, "window": window or None})
 
 
 @app.command()
 def step(
     action: Annotated[str, typer.Argument(help="click | type | navigate")],
-    selector: Annotated[str, typer.Option(help="CSS selector (for click/type)")] = "",
+    selector: Annotated[str, typer.Option(help="Selector for click/type (CSS by default; see --by)")] = "",
     value: Annotated[str, typer.Option(help="Text to type, or URL to navigate to")] = "",
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
+    by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
 ) -> None:
-    """Inject an action and capture before/after state as one step.
+    """Inject an action and capture before/after state (saved to ./data/).
 
     \b
     Examples:
         trainee-sim step click --selector "button.next"
+        trainee-sim step click --by xpath --selector "//button[contains(.,'Launch')]"
         trainee-sim step type  --selector "#search" --value "hello"
         trainee-sim step navigate --value "https://training.local/module/2"
     """
-    _request(
+    _request_capturing(
         "/step",
         json={
             "action": action,
             "selector": selector or None,
             "value": value or None,
             "label": label or None,
+            "by": by,
             "window": window or None,
         },
     )

@@ -314,12 +314,16 @@ class BrowserSession:
             await self.switch(window)
         state = await self.snapshot()
         path = self.capture.record(label, {"state": state})
-        return _step_summary(path, self.capture.enabled, state)
+        summary = _step_summary(path, self.capture.enabled, state)
+        # The full payload rides back so the client can save it to ./data/ and
+        # read it locally — the server-side file (path) is the gated copy.
+        summary["record"] = {"label": label, "state": state}
+        return summary
 
     # --- action ---
 
     def _perform_sync(
-        self, driver: WebDriver, action: str, selector: str | None, value: str | None
+        self, driver: WebDriver, action: str, selector: str | None, value: str | None, by: str = "css"
     ) -> dict[str, Any]:
         from selenium.webdriver.common.by import By
 
@@ -330,16 +334,19 @@ class BrowserSession:
             return {"action": "navigate", "url": value}
 
         if selector is None:
-            raise ValueError(f"{action} requires a CSS selector")
-        el = driver.find_element(By.CSS_SELECTOR, selector)
+            raise ValueError(f"{action} requires a selector")
+        locator = {"css": By.CSS_SELECTOR, "xpath": By.XPATH}.get(by)
+        if locator is None:
+            raise ValueError(f"unknown selector type {by!r} (use css or xpath)")
+        el = driver.find_element(locator, selector)
 
         if action == "click":
             el.click()
-            return {"action": "click", "selector": selector}
+            return {"action": "click", "by": by, "selector": selector}
         if action == "type":
             el.clear()
             el.send_keys(value or "")
-            return {"action": "type", "selector": selector}
+            return {"action": "type", "by": by, "selector": selector}
         raise ValueError(f"Unknown action: {action!r} (use click, type, or navigate)")
 
     async def act(
@@ -349,31 +356,33 @@ class BrowserSession:
         value: str | None = None,
         label: str | None = None,
         window: str | None = None,
+        by: str = "css",
     ) -> dict[str, Any]:
         """Inject an action, capturing before/after state as one step.
 
         The before/after pair is exactly the raw material for authoring a rule:
         "in this state I did X, and it moved me to that state." If `window` is
-        given, switch focus to it before acting.
+        given, switch focus to it before acting. `by` selects css (default) or
+        xpath, so a button can be targeted by visible text when it has no id.
         """
         driver = await self._ready()
         if window is not None:
             await asyncio.to_thread(self._switch_sync, driver, window)
         before = await self.snapshot()
-        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value)
+        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by)
         after = await self.snapshot()
         step_label = label or f"{action}-{selector or value or ''}"
-        path = self.capture.record(
-            step_label,
-            {
-                "action": {"action": action, "selector": selector, "value": value},
-                "result": result,
-                "before": before,
-                "after": after,
-            },
-        )
+        record = {
+            "label": step_label,
+            "action": {"action": action, "by": by, "selector": selector, "value": value},
+            "result": result,
+            "before": before,
+            "after": after,
+        }
+        path = self.capture.record(step_label, record)
         summary = _step_summary(path, self.capture.enabled, after)
         summary["performed"] = result
+        summary["record"] = record
         return summary
 
 
