@@ -123,14 +123,56 @@ class BrowserSession:
             raise NotConnected("No browser session. Run `trainee-sim connect` first.")
         return self._driver
 
+    def _focus_live_window(self, driver: WebDriver) -> bool:
+        """Ensure the driver is focused on a live window; return False if the
+        browser is gone entirely.
+
+        Selenium does not move focus when a tab closes, so after the human
+        closes the focused tab every driver call throws until we switch to a
+        surviving window. This makes that switch, and distinguishes "focused tab
+        closed but others remain" (recoverable) from "browser closed" (dead).
+        """
+        try:
+            handles = driver.window_handles
+        except Exception:
+            return False  # session/browser is dead
+        if not handles:
+            return False
+        try:
+            if driver.current_window_handle in handles:
+                return True  # focused window still alive
+        except Exception:
+            pass  # focused window was closed; fall through and re-home
+        try:
+            driver.switch_to.window(handles[-1])
+            return True
+        except Exception:
+            return False
+
+    async def _ready(self) -> WebDriver:
+        """Driver focused on a live window, or a clean NotConnected if it's gone.
+
+        The single guard every observation/action runs first. If the browser was
+        closed we drop the dead driver (so status is honest and the next
+        `connect` rebuilds) and surface a 499, not a 500.
+        """
+        driver = self._require()
+        if not await asyncio.to_thread(self._focus_live_window, driver):
+            await self.shutdown()
+            raise NotConnected("The browser was closed. Run `trainee-sim connect` to reopen it.")
+        return driver
+
     async def status(self) -> dict[str, Any]:
-        connected = self._driver is not None
         url: str | None = None
         title: str | None = None
+        # Probe rather than trust the reference: the browser may have been closed
+        # since it was created. _focus_live_window re-homes onto a surviving tab
+        # if the focused one was closed, so status stays truthful either way.
+        connected = self._driver is not None and await asyncio.to_thread(self._focus_live_window, self._driver)
         if connected:
             try:
                 url, title = await asyncio.to_thread(lambda: (self._driver.current_url, self._driver.title))
-            except Exception as exc:  # driver alive but page not queryable
+            except Exception as exc:
                 logger.warning("status_probe_failed", error=str(exc))
         return {
             "connected": connected,
@@ -173,7 +215,7 @@ class BrowserSession:
         return out
 
     async def windows(self) -> dict[str, Any]:
-        driver = self._require()
+        driver = await self._ready()
         windows = await asyncio.to_thread(self._list_windows_sync, driver)
         return {"windows": windows, "count": len(windows)}
 
@@ -208,7 +250,7 @@ class BrowserSession:
         }
 
     async def switch(self, target: str) -> dict[str, Any]:
-        driver = self._require()
+        driver = await self._ready()
         result = await asyncio.to_thread(self._switch_sync, driver, target)
         logger.info("window_switched", index=result["index"], url=result["url"])
         return {"status": "ok", **result}
@@ -260,7 +302,7 @@ class BrowserSession:
         }
 
     async def snapshot(self) -> dict[str, Any]:
-        driver = self._require()
+        driver = await self._ready()
         return await asyncio.to_thread(self._snapshot_sync, driver)
 
     async def observe(self, label: str = "observe", window: str | None = None) -> dict[str, Any]:
@@ -314,7 +356,7 @@ class BrowserSession:
         "in this state I did X, and it moved me to that state." If `window` is
         given, switch focus to it before acting.
         """
-        driver = self._require()
+        driver = await self._ready()
         if window is not None:
             await asyncio.to_thread(self._switch_sync, driver, window)
         before = await self.snapshot()
