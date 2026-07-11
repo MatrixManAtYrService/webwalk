@@ -62,6 +62,33 @@ class BrowserSession:
         logger.info("launching_local_chrome")
         return webdriver.Chrome(options=options)
 
+    def _driver_alive(self, driver: WebDriver) -> bool:
+        """Cheap round-trip to the browser; False if the session/window is gone.
+
+        If the user closes the browser (e.g. to retry auth), the driver object
+        lingers but its session is dead — any command then raises. We probe with
+        window_handles so we can rebuild instead of crashing.
+        """
+        try:
+            return bool(driver.window_handles)
+        except Exception:
+            return False
+
+    def _navigate_sync(self, driver: WebDriver, url: str) -> str:
+        """Focus a live window (the previous one may be closed), then navigate."""
+        handles = driver.window_handles
+        if not handles:
+            driver.switch_to.new_window("tab")
+        else:
+            try:
+                focused_ok = driver.current_window_handle in handles
+            except Exception:
+                focused_ok = False
+            if not focused_ok:
+                driver.switch_to.window(handles[-1])
+        driver.get(url)
+        return driver.current_url
+
     async def connect(self, start_url: str | None = None) -> dict[str, Any]:
         """Open (or reuse) the browser and navigate to the training entry point.
 
@@ -70,14 +97,18 @@ class BrowserSession:
         """
         async with self._lock:
             SETTINGS.ensure_dirs()
+            # Discard a dead driver (browser was closed) before reusing it.
+            if self._driver is not None and not await asyncio.to_thread(self._driver_alive, self._driver):
+                logger.info("discarding_dead_driver")
+                await self.shutdown()
             if self._driver is None:
                 self._driver = await asyncio.to_thread(self._build_driver)
                 logger.info("browser_connected", remote=bool(SETTINGS.webdriver_url))
             url = start_url or SETTINGS.start_url
-            await asyncio.to_thread(self._driver.get, url)
+            current_url = await asyncio.to_thread(self._navigate_sync, self._driver, url)
             return {
                 "status": "ok",
-                "url": self._driver.current_url,
+                "url": current_url,
                 "telemetry": self.capture.enabled,
                 "instructions": (
                     "Browser opened on the server machine. Complete any login/MFA and load "
