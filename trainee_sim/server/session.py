@@ -38,6 +38,14 @@ class NotConnected(RuntimeError):
     """An observation/action was attempted before the browser was connected."""
 
 
+class ActionFailed(RuntimeError):
+    """A click/type couldn't be performed (element not found, not clickable, …).
+
+    Carries a readable reason so the caller gets a 4xx with a message instead of
+    an opaque 500 when a selector is wrong or the element isn't interactable.
+    """
+
+
 class BrowserSession:
     """Owns the live Selenium browser. One per server process."""
 
@@ -469,24 +477,36 @@ class BrowserSession:
 
         if selector is None:
             raise ValueError(f"{action} requires a selector")
+        if action not in ("click", "type"):
+            raise ValueError(f"Unknown action: {action!r} (use click, type, or navigate)")
         locator = {"css": By.CSS_SELECTOR, "xpath": By.XPATH}.get(by)
         if locator is None:
             raise ValueError(f"unknown selector type {by!r} (use css or xpath)")
 
         # Descend into the target frame (if any), act, then always return to top.
-        self._enter_frame_path(driver, frame or [])
+        # Any Selenium/lookup failure (no such element, not interactable, bad
+        # frame index, …) becomes a readable ActionFailed rather than a 500.
+        frame = frame or []
         try:
+            self._enter_frame_path(driver, frame)
             el = driver.find_element(locator, selector)
             if action == "click":
                 el.click()
-                return {"action": "click", "by": by, "selector": selector, "frame": frame or []}
-            if action == "type":
+            else:  # type
                 el.clear()
                 el.send_keys(value or "")
-                return {"action": "type", "by": by, "selector": selector, "frame": frame or []}
-            raise ValueError(f"Unknown action: {action!r} (use click, type, or navigate)")
+            return {"action": action, "by": by, "selector": selector, "frame": frame}
+        except Exception as exc:
+            raise ActionFailed(self._describe_action_error(exc, action, by, selector, frame))
         finally:
             driver.switch_to.default_content()
+
+    @staticmethod
+    def _describe_action_error(exc: Exception, action: str, by: str, selector: str | None, frame: list[Any]) -> str:
+        reason = (getattr(exc, "msg", None) or str(exc) or "").strip()
+        first_line = reason.splitlines()[0] if reason else type(exc).__name__
+        where = f" in frame {frame}" if frame else ""
+        return f"could not {action} {by}={selector!r}{where}: {type(exc).__name__}: {first_line}"
 
     async def act(
         self,
@@ -498,6 +518,9 @@ class BrowserSession:
         by: str = "css",
         secret: bool = False,
         frame: Any = None,
+        settle: float = 0.0,
+        wait_after: str | None = None,
+        wait_after_timeout: float = 10.0,
     ) -> dict[str, Any]:
         """Inject an action, capturing before/after state as one step.
 
@@ -508,12 +531,25 @@ class BrowserSession:
         `frame` targets an element inside a (nested) iframe. When `secret`, the
         typed value is redacted everywhere it is recorded (server capture + the
         payload returned to the client) — for passwords.
+
+        SPA pages render asynchronously, so an immediate after-snapshot can catch
+        a half-built page. Let the result settle first with either `wait_after`
+        (poll until this selector — in the action's `by`/`frame` — is visible,
+        up to `wait_after_timeout`) or a fixed `settle` delay in seconds.
         """
         driver = await self._ready()
         if window is not None:
             await asyncio.to_thread(self._switch_sync, driver, window)
+        parsed_frame = self._parse_frame(frame)
         before = await self.snapshot()
-        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by, self._parse_frame(frame))
+        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by, parsed_frame)
+        settled: dict[str, Any] | None = None
+        if wait_after:
+            settled = await asyncio.to_thread(
+                self._wait_sync, driver, None, wait_after, by, parsed_frame, wait_after_timeout, 0.3
+            )
+        elif settle > 0:
+            await asyncio.sleep(settle)
         after = await self.snapshot()
         step_label = label or f"{action}-{selector or ''}"
         record = {
@@ -523,6 +559,9 @@ class BrowserSession:
                 "by": by,
                 "selector": selector,
                 "value": "<redacted>" if secret else value,
+                "settle": settle,
+                "wait_after": wait_after,
+                "settled": settled,  # {matched, url} if wait_after was used
             },
             "result": result,
             "before": before,

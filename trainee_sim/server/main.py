@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from trainee_sim.server.config import SETTINGS
-from trainee_sim.server.session import SESSION, NotConnected
+from trainee_sim.server.session import SESSION, ActionFailed, NotConnected
 
 logger = structlog.get_logger()
 
@@ -137,6 +137,9 @@ class StepBody(BaseModel):
     by: str = "css"  # css | xpath
     secret: bool = False  # redact the value everywhere it is recorded
     frame: str | None = None  # nested-frame path, e.g. "0" or "0/1"
+    settle: float = 0.0  # seconds to wait before the after-snapshot
+    wait_after: str | None = None  # or: wait until this selector is visible first
+    wait_after_timeout: float = 10.0
 
 
 class WaitBody(BaseModel):
@@ -171,7 +174,12 @@ async def step(body: StepBody) -> dict[str, Any]:
             by=body.by,
             secret=body.secret,
             frame=body.frame,
+            settle=body.settle,
+            wait_after=body.wait_after,
+            wait_after_timeout=body.wait_after_timeout,
         )
+    except ActionFailed as exc:
+        raise HTTPException(status_code=422, detail={"error": "action_failed", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 

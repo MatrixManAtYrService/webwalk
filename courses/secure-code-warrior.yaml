@@ -1,0 +1,59 @@
+# State signatures for the Fiserv / Secure Code Warrior flow.
+#
+# Each state is a way to recognize "where we are" from an `observe` payload.
+# The engine matches the live browser against these to answer "where am I?".
+# Signals are intentionally minimal + stable (ids, hrefs, frame+text) rather
+# than position- or date-dependent. Add states as we discover them.
+
+states:
+  # --- Microsoft (Entra) SSO, used by both Fiserv and the Clover/SCW hop ---
+  - id: ms-login-username
+    url_contains: login.microsoftonline.com
+    elements:
+      - { id: i0116 }                      # the email/username field
+
+  - id: ms-login-password
+    url_contains: login.microsoftonline.com
+    elements:
+      - { type: password }
+
+  - id: ms-mfa-code
+    url_contains: login.microsoftonline.com
+    elements:
+      - { id: idTxtBx_SAOTCC_OTC }         # authenticator one-time-code field
+
+  # --- Fiserv FUEL (SharePoint) home ---
+  - id: fuel-home
+    url_contains: sharepoint.com/sites/fuel-home
+    elements:
+      - { href_contains: "signin/Xchange" }
+
+  # --- Cornerstone LMS ---
+  - id: lms-learner-home
+    url_contains: csod.com/ui/lms-learner-home
+
+  - id: lms-curriculum
+    url_contains: csod.com/ui/training/app
+    elements:
+      - { text: Launch }                   # the (top-level) curriculum Launch button
+
+  - id: course-player-launch
+    url_contains: csod.com/ui/training/app
+    elements:
+      - { frame: [3, 1], text: Launch Course }   # inner launcher, two frames deep
+
+  # --- Secure Code Warrior ---
+  - id: scw-login
+    url_contains: portal.securecodewarrior.com/#/login
+    elements:
+      - { id: email }
+
+  - id: scw-language-list
+    url_contains: courses/course-list
+    elements:
+      - { frame: [0], text_contains: Python Basic }
+
+  - id: scw-course-breakdown
+    url_contains: /breakdown/
+    elements:
+      - { frame: [0], text: Resume }

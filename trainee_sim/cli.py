@@ -112,6 +112,10 @@ def _request_capturing(path: str, save: bool = False, **kwargs) -> None:
     if record is not None and (save or result.get("recorded")):
         result["local_path"] = _save_capture(record)
     typer.echo(json.dumps(result, indent=2, default=str))
+    # A failed action (e.g. selector not found) returns an "error" body; exit
+    # non-zero so a scripted chain (login.nu) halts instead of barreling on.
+    if result.get("error"):
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -190,6 +194,9 @@ def step(
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
     by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
     frame: Annotated[str, typer.Option(help="Target an element inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
+    settle: Annotated[float, typer.Option(help="Seconds to wait before the after-snapshot (let SPA render)")] = 0.0,
+    wait_after: Annotated[str, typer.Option(help="Or: wait until this selector is visible before snapshotting")] = "",
+    wait_after_timeout: Annotated[float, typer.Option(help="Timeout for --wait-after (seconds)")] = 10.0,
     save: Annotated[bool, typer.Option(help="Save the full capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Inject an action and capture before/after state.
@@ -212,6 +219,9 @@ def step(
             "by": by,
             "window": window or None,
             "frame": frame or None,
+            "settle": settle,
+            "wait_after": wait_after or None,
+            "wait_after_timeout": wait_after_timeout,
         },
     )
 
@@ -301,6 +311,9 @@ def click(
     label: Annotated[str, typer.Option(help="Short label for this step")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
     frame: Annotated[str, typer.Option(help="Click an element inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
+    settle: Annotated[float, typer.Option(help="Seconds to wait before the after-snapshot (let SPA render)")] = 0.0,
+    wait_after: Annotated[str, typer.Option(help="Or: wait until this selector is visible before snapshotting")] = "",
+    wait_after_timeout: Annotated[float, typer.Option(help="Timeout for --wait-after (seconds)")] = 10.0,
     save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Click an element (a friendlier `step click`).
@@ -310,6 +323,7 @@ def click(
         trainee-sim click --element "input#idSIButton9"
         trainee-sim click --by xpath --element "//button[contains(.,'Launch')]"
         trainee-sim click --frame 0 --element "button.next"   # inside the first iframe
+        trainee-sim click --frame 0 --element "a.course" --wait-after "button.resume"
     """
     if not element:
         typer.echo("Which element? Pass --element with a selector.", err=True)
@@ -324,8 +338,52 @@ def click(
             "label": label or None,
             "window": window or None,
             "frame": frame or None,
+            "settle": settle,
+            "wait_after": wait_after or None,
+            "wait_after_timeout": wait_after_timeout,
         },
     )
+
+
+@app.command()
+def where(
+    states: Annotated[str, typer.Option(help="YAML file of state signatures")] = "courses/secure-code-warrior.yaml",
+    window: Annotated[str, typer.Option(help="Observe this window (index/'latest'/url substring)")] = "",
+) -> None:
+    """Observe the browser and report which known course-state(s) you're in.
+
+    The foundation of the engine: match the live page against a course's state
+    signatures to locate our position — so a flow can be resumed from anywhere.
+    Zero matches means "unknown" (add a signature); more than one means the
+    signatures overlap and should be tightened.
+    """
+    import yaml
+
+    from trainee_sim.engine.matcher import match_states
+
+    states_path = Path(states)
+    if not states_path.exists():
+        typer.echo(f"States file not found: {states_path}", err=True)
+        raise typer.Exit(1)
+    state_defs = (yaml.safe_load(states_path.read_text()) or {}).get("states", [])
+
+    result = _call("/observe", json={"label": "where", "window": window or None})
+    payload = (result.get("record") or {}).get("state") or {}
+    matched = match_states(state_defs, payload)
+    typer.echo(
+        json.dumps(
+            {
+                "matched": matched,
+                "unambiguous": len(matched) == 1,
+                "url": payload.get("url"),
+                "title": payload.get("title"),
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    if not matched:
+        raise typer.Exit(1)
 
 
 @app.command()
