@@ -9,7 +9,7 @@
   trainee-sim check            is the server up?
 
 The server usually runs on another machine on the LAN. Point at it with
-TS_SERVER_URL (default http://localhost:8000).
+TS_SERVER_URL (default http://localhost:22133).
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ import json
 from typing import Annotated
 
 import typer
+
+from trainee_sim.constants import DEFAULT_PORT
 
 app = typer.Typer(
     help="trainee-sim — drive a Selenium browser through training material and capture the flow.\n\n"
@@ -30,7 +32,7 @@ app = typer.Typer(
 @app.command()
 def serve(
     host: Annotated[str, typer.Option(help="Host to bind to (0.0.0.0 so a LAN client can reach it)")] = "0.0.0.0",  # noqa: S104
-    port: Annotated[int, typer.Option(help="Port to bind to")] = 22133,
+    port: Annotated[int, typer.Option(help="Port to bind to")] = DEFAULT_PORT,
     reload: Annotated[bool, typer.Option(help="Auto-reload for development")] = False,
 ) -> None:
     """Start the trainee-sim server (holds the live browser session in memory)."""

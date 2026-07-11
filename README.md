@@ -34,7 +34,7 @@ credentials can't leak into the capture log.
 
 ```bash
 trainee-sim serve                         # on the target machine
-export TS_SERVER_URL=http://<target>:8000 # on your machine
+export TS_SERVER_URL=http://<target>:22133 # on your machine
 trainee-sim connect                       # browser opens on the target machine
 #   … log in + load the training by hand in that window …
 trainee-sim telemetry on

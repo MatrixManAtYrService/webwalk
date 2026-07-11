@@ -2,7 +2,7 @@
 
 The CLI is stateless: each invocation makes one HTTP request. The live browser
 session lives only in the server, which typically runs on another machine on
-the LAN — set TS_SERVER_URL to point at it (default http://localhost:8000).
+the LAN — set TS_SERVER_URL to point at it (default http://localhost:22133).
 """
 
 from __future__ import annotations
@@ -13,13 +13,15 @@ from typing import Any
 
 import httpx
 
+from trainee_sim.constants import DEFAULT_SERVER_URL
+
 # Connecting the browser can take a while (Selenium Manager may download a
 # driver on first use); keep a generous default timeout.
 DEFAULT_TIMEOUT = 120.0
 
 
 def get_server_url() -> str:
-    return os.environ.get("TS_SERVER_URL", "http://localhost:8000").rstrip("/")
+    return os.environ.get("TS_SERVER_URL", DEFAULT_SERVER_URL).rstrip("/")
 
 
 class ServerUnreachable(RuntimeError):
