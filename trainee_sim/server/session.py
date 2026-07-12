@@ -363,18 +363,26 @@ class BrowserSession:
                 # (Grid). The metadata event still stands; just no body.
                 self.network.attach_body(request_id, None)
 
-    async def network_events(self) -> dict[str, Any]:
+    async def network_events(self, since: float | None = None) -> dict[str, Any]:
         """Pump and return the currently buffered events (non-destructive peek).
 
         Backs the `/network` debug endpoint — a way to see traffic without
         taking a full step. It does NOT drain, so a following observe/step still
-        gets these events attached to its capture.
+        gets these events attached to its capture. `since` (seconds) keeps only
+        events from the last N seconds — handy right after doing a thing to see
+        just that thing's traffic (times are wall-clock, ws frames included).
         """
+        import time
+
         stats = self.network.stats()
         if self._driver is not None and await asyncio.to_thread(self._focus_live_window, self._driver):
             await asyncio.to_thread(self._pump_network_sync, self._driver)
             stats = self.network.stats()
-        return {**stats, "events": self.network.peek()}
+        events = self.network.peek()
+        if since is not None:
+            cutoff = time.time() - since
+            events = [e for e in events if (e.get("ts") or 0) >= cutoff]
+        return {**stats, "since": since, "shown": len(events), "events": events}
 
     # --- frames / iframes ---
     #

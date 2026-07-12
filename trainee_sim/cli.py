@@ -86,18 +86,30 @@ def _request(path: str, **kwargs) -> None:
     typer.echo(json.dumps(_call(path, **kwargs), indent=2, default=str))
 
 
-def _save_capture(record: dict[str, Any]) -> str:
-    """Write a fetched capture record to ./data/captures/, numbered + slugified."""
+def _next_local_path(subdir: str, label: str) -> Path:
+    """Next numbered ./data/<subdir>/NNNNN-<label>.json path (continues numbering)."""
     from trainee_sim.server.capture import slugify
 
-    captures = LOCAL_DATA_DIR / "captures"
-    captures.mkdir(parents=True, exist_ok=True)
+    out = LOCAL_DATA_DIR / subdir
+    out.mkdir(parents=True, exist_ok=True)
     seq = 1 + max(
-        (int(p.stem.split("-", 1)[0]) for p in captures.glob("*.json") if p.stem.split("-", 1)[0].isdigit()),
+        (int(p.stem.split("-", 1)[0]) for p in out.glob("*.json") if p.stem.split("-", 1)[0].isdigit()),
         default=0,
     )
-    path = captures / f"{seq:05d}-{slugify(record.get('label', 'step'))}.json"
+    return out / f"{seq:05d}-{slugify(label)}.json"
+
+
+def _save_capture(record: dict[str, Any]) -> str:
+    """Write a fetched capture record to ./data/captures/, numbered + slugified."""
+    path = _next_local_path("captures", record.get("label", "step"))
     path.write_text(json.dumps(record, indent=2, default=str))
+    return str(path)
+
+
+def _save_network(payload: dict[str, Any]) -> str:
+    """Write a network dump to ./data/network/, numbered — bodies can be large."""
+    path = _next_local_path("network", "network")
+    path.write_text(json.dumps(payload, indent=2, default=str))
     return str(path)
 
 
@@ -151,17 +163,64 @@ def status() -> None:
     _request("/session/status", method="GET")
 
 
+def _parse_duration(s: str) -> float:
+    """Parse a short duration like '5s', '500ms', '2m' (bare number = seconds)."""
+    s = s.strip().lower()
+    try:
+        if s.endswith("ms"):
+            return float(s[:-2]) / 1000
+        if s.endswith("s"):
+            return float(s[:-1])
+        if s.endswith("m"):
+            return float(s[:-1]) * 60
+        return float(s)
+    except ValueError:
+        raise typer.BadParameter(f"bad duration {s!r} (try 5s, 500ms, 2m)")
+
+
 @app.command()
-def network() -> None:
+def network(
+    since: Annotated[str, typer.Option(help="Only events from the last <dur> (e.g. 5s, 500ms, 2m)")] = "",
+    full: Annotated[bool, typer.Option(help="Print every event's full JSON to stdout (noisy)")] = False,
+    save: Annotated[bool, typer.Option(help="Write the full dump to ./data/network/ (on by default)")] = True,
+) -> None:
     """Show the captured training API traffic (requests/responses + ws frames).
 
-    A debug view of the network recorder: prints the events buffered since the
-    last observe/step, without consuming them. Empty while telemetry is off —
-    network capture is gated by the same telemetry switch, so auth traffic is
-    never recorded. The full per-request bodies also ride along inside each
-    `observe`/`step` capture (a `network` key alongside `elements`/`dom`).
+    Bodies can be huge, so by default this writes the full dump to
+    ./data/network/ and prints a compact one-line-per-event index plus the file
+    path — paste that path to inspect the detail. Pass --full to dump everything
+    to stdout instead. Events are the ones buffered since the last observe/step
+    (a non-destructive peek). Empty while telemetry is off — capture is gated by
+    the same switch, so auth traffic is never recorded. The same per-request
+    detail also rides inside each observe/step capture (a `network` key).
+
+    Tip: set TS_NETWORK_HOSTS on the server (e.g. "securecodewarrior.com") to
+    filter out analytics/RUM noise and keep only the training's own API.
+
+    \b
+    Examples:
+        trainee-sim network                 # everything buffered since last step
+        trainee-sim network --since 5s      # just the last 5 seconds
     """
-    _request("/network", method="GET")
+    params = {"since": _parse_duration(since)} if since else None
+    result = _call("/network", method="GET", params=params)
+    events = result.get("events", []) or []
+    if full:
+        typer.echo(json.dumps(result, indent=2, default=str))
+        return
+    saved = _save_network(result) if save else None
+    summary = {k: result.get(k) for k in ("enabled", "hosts", "buffered", "pending", "since", "shown")}
+    summary["saved"] = saved
+    typer.echo(json.dumps(summary, indent=2, default=str))
+    for e in events:
+        if e.get("type") == "ws":
+            payload = (e.get("payload") or "")[:70]
+            typer.echo(f"  ws {e.get('direction', ''):8} op={e.get('opcode')} {payload}")
+        else:
+            method = str(e.get("method") or "")
+            status = str(e.get("status") or "···")
+            url = str(e.get("url") or "")[:110]
+            typer.echo(f"  {method:4} {status:>3} {url}")
 
 
 @app.command()

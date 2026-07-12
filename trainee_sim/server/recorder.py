@@ -73,6 +73,11 @@ class NetworkRecorder:
         # Completed events still awaiting an out-of-band body fetch, by requestId.
         self._await_body: dict[str, dict[str, Any]] = {}
         self._pending_cap = max_events
+        # CDP stamps websocket frames with a MONOTONIC clock, but HTTP requests
+        # carry both monotonic (`timestamp`) and wall-clock (`wallTime`). We learn
+        # the offset from any request and use it to give ws frames a real
+        # wall-clock `ts`, so everything is filterable on one timeline (--since).
+        self._wall_offset: float | None = None
 
     # --- gate ---
 
@@ -92,6 +97,7 @@ class NetworkRecorder:
         self._events.clear()
         self._pending.clear()
         self._await_body.clear()
+        self._wall_offset = None
 
     # --- filtering ---
 
@@ -139,6 +145,11 @@ class NetworkRecorder:
     def _on_request(self, params: dict[str, Any]) -> None:
         request = params.get("request") or {}
         url = request.get("url", "")
+        # Learn the monotonic→wall offset from any request (even a filtered one),
+        # so websocket frames get a real wall-clock timestamp.
+        wall, mono = params.get("wallTime"), params.get("timestamp")
+        if wall is not None and mono is not None:
+            self._wall_offset = wall - mono
         if not self._host_ok(url):
             return
         # Only track types we care about; CDP tags the type on the request event.
@@ -187,9 +198,13 @@ class NetworkRecorder:
         # we keep them all (the websocket channel is exactly what we want to see).
         response = params.get("response") or {}
         payload = response.get("payloadData")
+        mono = params.get("timestamp")
+        # Convert the monotonic frame time to wall-clock if we've learned the
+        # offset (from an HTTP request); otherwise fall back to the raw value.
+        ts = mono + self._wall_offset if (mono is not None and self._wall_offset is not None) else mono
         self._events.append(
             {
-                "ts": params.get("timestamp"),
+                "ts": ts,
                 "type": "ws",
                 "direction": "sent" if method.endswith("Sent") else "received",
                 "opcode": response.get("opcode"),

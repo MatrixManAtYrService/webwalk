@@ -185,14 +185,15 @@ async def step(body: StepBody) -> dict[str, Any]:
 
 
 @app.get("/network")
-async def network() -> dict[str, Any]:
+async def network(since: float | None = None) -> dict[str, Any]:
     """Debug view of the network recorder: state + currently buffered events.
 
     Pumps the recorder and returns a non-destructive peek, so you can inspect
-    the training's API traffic without taking a full observe/step. Empty while
-    telemetry is off (nothing is retained during auth).
+    the training's API traffic without taking a full observe/step. `since`
+    (seconds) trims to just the last N seconds. Empty while telemetry is off
+    (nothing is retained during auth).
     """
-    return await SESSION.network_events()
+    return await SESSION.network_events(since=since)
 
 
 @app.post("/wait")

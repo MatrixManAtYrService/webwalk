@@ -8,13 +8,17 @@ if "TS_PW" not-in $env {
 
 uv run trainee-sim connect https://fiservcorp.sharepoint.com/sites/fuel-home/
 
+# First wait for the redirect to Microsoft — generous, but it returns the moment
+# the URL matches, so it costs nothing when the redirect is quick.
+uv run trainee-sim wait-for --url login.microsoftonline.com --timeout 60
+
 # Azure AD is username-first, but a remembered profile jumps STRAIGHT to the
-# password page (skipping email). So fill the email only if its field actually
-# shows up: gate on the FIELD (a url-only wait returns instantly — connect
-# already lands on the oauth2/authorize URL), and wrap it in `try` so the
-# wait-for timeout is non-fatal on the skip-straight-to-password path.
+# password page (skipping email). Once we're on the MS page the form paints
+# fast, so probe for the email field with a SHORT timeout: fill it if present,
+# and let `try` swallow the quick timeout on the skip-to-password path (this is
+# what used to stall ~20s before the password went in).
 try {
-    uv run trainee-sim wait-for --url login.microsoftonline.com --element "input#i0116" --timeout 20
+    uv run trainee-sim wait-for --element "input#i0116" --timeout 6
     uv run trainee-sim type $env.FISERV_USER --into "input#i0116"
     uv run trainee-sim click --element "input#idSIButton9"
 }

@@ -32,11 +32,15 @@ def _response(request_id: str, status: int = 200, content_type: str = "applicati
     }
 
 
-def _ws_frame(request_id: str, sent: bool, payload: str, opcode: int = 1):
+def _ws_frame(request_id: str, sent: bool, payload: str, opcode: int = 1, timestamp: float = 5.0):
     which = "Sent" if sent else "Received"
     return {
         "method": f"Network.webSocketFrame{which}",
-        "params": {"requestId": request_id, "timestamp": 5.0, "response": {"opcode": opcode, "payloadData": payload}},
+        "params": {
+            "requestId": request_id,
+            "timestamp": timestamp,
+            "response": {"opcode": opcode, "payloadData": payload},
+        },
     }
 
 
@@ -180,3 +184,37 @@ def test_response_without_tracked_request_is_ignored():
     want = rec.ingest([_response("orphan")])
     assert want == []
     assert rec.drain() == []
+
+
+def test_http_event_ts_is_wallclock():
+    # requestWillBeSent carries wallTime (epoch); the event's ts uses it directly.
+    rec = NetworkRecorder(enabled=True)
+    msg = _request("1", "https://api.example.com/x")
+    msg["params"]["wallTime"] = 1_700_000_000.0
+    msg["params"]["timestamp"] = 500.0  # monotonic — must NOT be used for ts
+    rec.ingest([msg, _response("1", content_type="text/plain")])
+    (ev,) = rec.drain()
+    assert ev["ts"] == 1_700_000_000.0
+
+
+def test_ws_frame_ts_converted_to_wallclock():
+    # ws frames only carry a monotonic timestamp; we convert it to wall-clock
+    # using the offset learned from a request (wallTime - monotonic timestamp).
+    rec = NetworkRecorder(enabled=True)
+    req = _request("1", "https://api.example.com/x")
+    req["params"]["wallTime"] = 1_700_000_000.0
+    req["params"]["timestamp"] = 1000.0  # offset = 1_699_999_000.0
+    rec.ingest([req, _response("1", content_type="text/plain")])
+    rec.ingest([_ws_frame("ws1", sent=False, payload="hi", timestamp=1005.0)])
+    events = rec.drain()
+    ws = next(e for e in events if e["type"] == "ws")
+    assert ws["ts"] == 1_700_000_005.0  # 1005.0 + offset
+
+
+def test_ws_frame_ts_falls_back_without_offset():
+    # No request seen yet → no offset → keep the raw monotonic value rather than
+    # inventing a wall-clock time.
+    rec = NetworkRecorder(enabled=True)
+    rec.ingest([_ws_frame("ws1", sent=True, payload="hi", timestamp=42.0)])
+    (ws,) = rec.drain()
+    assert ws["ts"] == 42.0
