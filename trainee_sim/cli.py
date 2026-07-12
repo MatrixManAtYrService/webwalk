@@ -579,6 +579,24 @@ def fetch(
         raise typer.Exit(1)
 
 
+@app.command(name="eval")
+def eval_js(
+    script: Annotated[str, typer.Argument(help="JS to run in the page (a bare expression is auto-returned)")],
+) -> None:
+    """Run JS in the logged-in page and print its result (introspection).
+
+    The escape hatch for what `observe` doesn't show — web storage, app state, or
+    how the SPA authenticates. Runs in the top document. A bare expression is
+    wrapped in `return (…)`; use explicit `return` for multi-statement scripts.
+
+    \b
+    Examples:
+        trainee-sim eval "Object.keys(localStorage)"
+        trainee-sim eval "return Object.entries(localStorage).map(([k,v])=>k+'='+v.slice(0,40))"
+    """
+    _request("/eval", json={"script": script})
+
+
 @app.command()
 def shutdown() -> None:
     """Close the browser session on the server."""

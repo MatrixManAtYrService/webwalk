@@ -764,6 +764,27 @@ class BrowserSession:
         )
         return result
 
+    # --- in-page JS eval (discovery/introspection) ---
+    #
+    # Run arbitrary JS in the top document and return its (JSON-able) result — the
+    # escape hatch for learning things `observe` doesn't surface: web-storage
+    # contents, app state, or (by installing a header hook) how the SPA
+    # authenticates. A raw `fetch` can't see an in-memory bearer token; eval can
+    # hook XMLHttpRequest to capture it from the app's own live requests.
+
+    def _eval_sync(self, driver: WebDriver, script: str, args: list[Any]) -> Any:
+        driver.switch_to.default_content()
+        # execute_script only returns a value if the body uses `return`; wrap a
+        # bare expression so callers can pass either.
+        body = script if "return" in script else f"return ({script});"
+        return driver.execute_script(body, *args)
+
+    async def eval_js(self, script: str, args: list[Any] | None = None) -> dict[str, Any]:
+        """Evaluate `script` in the page; returns {"result": <json-able value>}."""
+        driver = await self._ready()
+        result = await asyncio.to_thread(self._eval_sync, driver, script, args or [])
+        return {"result": result}
+
     async def act(
         self,
         action: str,

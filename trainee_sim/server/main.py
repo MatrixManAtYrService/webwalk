@@ -214,6 +214,20 @@ async def fetch(body: FetchBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
+class EvalBody(BaseModel):
+    script: str
+    args: list[Any] | None = None
+
+
+@app.post("/eval")
+async def eval_endpoint(body: EvalBody) -> dict[str, Any]:
+    """Run JS in the page and return its JSON-able result (introspection)."""
+    try:
+        return await SESSION.eval_js(script=body.script, args=body.args)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
 @app.get("/network")
 async def network(since: float | None = None) -> dict[str, Any]:
     """Debug view of the network recorder: state + currently buffered events.
