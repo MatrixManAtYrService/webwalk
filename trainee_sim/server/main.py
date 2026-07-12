@@ -190,6 +190,7 @@ class FetchBody(BaseModel):
     headers: dict[str, str] | None = None
     body: Any = None  # str sent as-is; anything else JSON-encoded
     timeout: float = 30.0
+    page_auth: bool = False  # attach the SPA's own bearer token from web storage
 
 
 @app.post("/fetch")
@@ -207,6 +208,7 @@ async def fetch(body: FetchBody) -> dict[str, Any]:
             headers=body.headers,
             body=body.body,
             timeout=body.timeout,
+            page_auth=body.page_auth,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})

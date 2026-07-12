@@ -544,21 +544,24 @@ def run(
 @app.command()
 def fetch(
     url: Annotated[str, typer.Argument(help="URL to request (the training's own API)")],
-    method: Annotated[str, typer.Option(help="HTTP method")] = "GET",
+    method: Annotated[str, typer.Option("--method", "-X", help="HTTP method")] = "GET",
     data: Annotated[str, typer.Option(help="Request body — a raw string (JSON string sends as JSON)")] = "",
     header: Annotated[list[str], typer.Option("--header", "-H", help="Extra header 'Name: value' (repeatable)")] = [],  # noqa: B006
+    page_auth: Annotated[bool, typer.Option("--page-auth", "-a", help="Attach the SPA's own bearer token from web storage")] = False,  # noqa: E501
 ) -> None:
     """Fire a request from inside the logged-in page (carries its session).
 
     The UI→API ratchet: hit the training's API directly instead of puppeting the
     UI. Runs in the top document's origin with credentials, so a same-origin API
-    gets the page's cookies. If the API wants a bearer token, pass it with -H
-    'Authorization: Bearer …'. Non-2xx comes back normally (see `status`/`ok`).
+    gets the page's cookies. SCW's portal-api instead needs a bearer token — pass
+    --page-auth to reuse the SPA's own token (kept in-browser), or set it yourself
+    with -H 'Authorization: Bearer …'. Non-2xx comes back normally (see status/ok).
 
     \b
     Examples:
         trainee-sim fetch https://portal-api.securecodewarrior.com/ping
-        trainee-sim fetch .../taskAttempt/<id>/answer --method POST --data '{}'
+        trainee-sim fetch .../auth/resume --page-auth
+        trainee-sim fetch .../taskAttempt/<id>/answer -X POST --data '{}' -a
     """
     headers: dict[str, str] = {}
     for h in header:
@@ -569,7 +572,7 @@ def fetch(
         headers[name.strip()] = value.strip()
     result = _call(
         "/fetch",
-        json={"url": url, "method": method, "headers": headers or None, "body": data or None},
+        json={"url": url, "method": method, "headers": headers or None, "body": data or None, "page_auth": page_auth},
     )
     typer.echo(json.dumps(result, indent=2, default=str))
     if not result.get("ok"):

@@ -639,9 +639,12 @@ class BrowserSession:
     # instead of puppeting the UI — mirroring finmap's `session.fetch_json`. The
     # request shapes come from the network recorder (docs/network-capture-design).
     #
-    # Auth note: `credentials: 'include'` carries cookies. If the API instead
-    # wants a bearer token the SPA holds in JS, pass it via `headers`
-    # (Authorization). We probe with a safe GET before trusting it for writes.
+    # Auth note: `credentials: 'include'` carries cookies, but SCW's portal-api
+    # authenticates with a **bearer token** the SPA keeps in web storage (cookies
+    # alone give 401). With `page_auth=True` the page-side script finds that token
+    # in local/sessionStorage (any value containing a JWT) and attaches it as
+    # `Authorization: Bearer …` — so the token is used *in the browser* and never
+    # transits to the client. Explicit `headers['Authorization']` wins over it.
 
     async def _throttle_fetch(self) -> None:
         """Serialize in-page fetches and space them out (interval + jitter)."""
@@ -662,17 +665,36 @@ class BrowserSession:
     # network/CORS), which comes back as {ok:false, status:0, error}.
     _FETCH_JS = """
         const url = arguments[0], method = arguments[1];
-        const headers = arguments[2] || {}, body = arguments[3];
+        const headers = Object.assign({}, arguments[2] || {});
+        const body = arguments[3], pageAuth = arguments[4];
         const done = arguments[arguments.length - 1];
+        // Find a JWT anywhere in web storage (values may be JSON-wrapped), so we
+        // can reuse the SPA's own bearer token without knowing its storage key.
+        function findBearer() {
+            const rx = /eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/;
+            for (const store of [window.localStorage, window.sessionStorage]) {
+                if (!store) continue;
+                for (let i = 0; i < store.length; i++) {
+                    const v = store.getItem(store.key(i));
+                    if (typeof v === 'string') { const m = v.match(rx); if (m) return m[0]; }
+                }
+            }
+            return null;
+        }
+        let authAttached = false;
+        if (pageAuth && !Object.keys(headers).some(k => k.toLowerCase() === 'authorization')) {
+            const t = findBearer();
+            if (t) { headers['Authorization'] = 'Bearer ' + t; authAttached = true; }
+        }
         (async () => {
             try {
                 const opts = { method, headers, credentials: 'include' };
                 if (body !== null && body !== undefined) opts.body = body;
                 const r = await fetch(url, opts);
                 const text = await r.text();
-                done({ ok: r.ok, status: r.status, body: text });
+                done({ ok: r.ok, status: r.status, body: text, authAttached });
             } catch (e) {
-                done({ ok: false, status: 0, error: String(e) });
+                done({ ok: false, status: 0, error: String(e), authAttached });
             }
         })();
     """
@@ -685,12 +707,13 @@ class BrowserSession:
         headers: dict[str, str],
         body: str | None,
         timeout: float,
+        page_auth: bool,
     ) -> dict[str, Any]:
         # Run in the top document (the SCW SPA's origin), not whatever frame a
         # previous action left us in — the API is same-origin with the top page.
         driver.switch_to.default_content()
         driver.set_script_timeout(timeout)
-        result = driver.execute_async_script(self._FETCH_JS, url, method, headers, body) or {}
+        result = driver.execute_async_script(self._FETCH_JS, url, method, headers, body, page_auth) or {}
         raw = result.get("body")
         parsed: Any = raw
         if isinstance(raw, str):
@@ -704,6 +727,7 @@ class BrowserSession:
             "status": result.get("status"),
             "ok": result.get("ok", False),
             "error": result.get("error"),
+            "auth_attached": result.get("authAttached", False),  # did page_auth find+attach a token?
             "body": parsed,
         }
 
@@ -714,12 +738,15 @@ class BrowserSession:
         headers: dict[str, str] | None = None,
         body: Any = None,
         timeout: float = 30.0,
+        page_auth: bool = False,
     ) -> dict[str, Any]:
         """Issue `method url` from inside the page and return {status, ok, body}.
 
         `body` may be a string (sent as-is) or JSON-able (serialized, with a
-        JSON content-type unless one is given). Rate limited. The call also shows
-        up in the network recorder, so telemetry corroborates what went out.
+        JSON content-type unless one is given). With `page_auth`, attach the
+        SPA's own bearer token from web storage (see `_FETCH_JS`). Rate limited.
+        The call also shows up in the network recorder, so telemetry corroborates
+        what went out.
         """
         driver = await self._ready()
         hdrs = {k: v for k, v in (headers or {}).items()}
@@ -728,8 +755,13 @@ class BrowserSession:
         if body is not None and not any(k.lower() == "content-type" for k in hdrs):
             hdrs["content-type"] = "application/json"
         await self._throttle_fetch()
-        result = await asyncio.to_thread(self._fetch_in_page_sync, driver, url, method.upper(), hdrs, body, timeout)
-        logger.info("fetch_in_page", method=method.upper(), url=url, status=result.get("status"), ok=result.get("ok"))
+        result = await asyncio.to_thread(
+            self._fetch_in_page_sync, driver, url, method.upper(), hdrs, body, timeout, page_auth
+        )
+        logger.info(
+            "fetch_in_page", method=method.upper(), url=url,
+            status=result.get("status"), ok=result.get("ok"), auth=result.get("auth_attached"),
+        )
         return result
 
     async def act(
