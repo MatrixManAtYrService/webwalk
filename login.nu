@@ -7,12 +7,31 @@ if "TS_PW" not-in $env {
 }
 
 uv run trainee-sim connect https://fiservcorp.sharepoint.com/sites/fuel-home/
-uv run trainee-sim wait-for --url login.microsoftonline.com
-uv run trainee-sim type $env.FISERV_USER --into "input#i0116"
+
+# Azure AD is username-first, but a remembered profile jumps STRAIGHT to the
+# password page (skipping email). So fill the email only if its field actually
+# shows up: gate on the FIELD (a url-only wait returns instantly — connect
+# already lands on the oauth2/authorize URL), and wrap it in `try` so the
+# wait-for timeout is non-fatal on the skip-straight-to-password path.
+try {
+    uv run trainee-sim wait-for --url login.microsoftonline.com --element "input#i0116" --timeout 20
+    uv run trainee-sim type $env.FISERV_USER --into "input#i0116"
+    uv run trainee-sim click --element "input#idSIButton9"
+}
+
+# Either path lands on the password page (field id i0118). Gate on that element,
+# not the URL, so we don't type into a half-rendered form.
+uv run trainee-sim wait-for --element "input#i0118" --timeout 60
+uv run trainee-sim type --into "input#i0118" --env TS_PW --secret
 uv run trainee-sim click --element "input#idSIButton9"
-uv run trainee-sim wait-for --element "input[type=password]"
-uv run trainee-sim type --into "input[type=password]" --env TS_PW --secret
-uv run trainee-sim click --element "input#idSIButton9"
+
+# Microsoft often interposes a "Stay signed in?" (KMSI) prompt before letting us
+# through. Accept it (click "Yes" = idSIButton9) if present; non-fatal when the
+# tenant skips it. The KMSI checkbox id is a stable marker for that page.
+try {
+    uv run trainee-sim wait-for --element "#KmsiCheckboxField" --timeout 10
+    uv run trainee-sim click --element "input#idSIButton9"
+}
 
 # Land on FUEL home, then launch Xchange (opens the Cornerstone LMS in a new tab).
 uv run trainee-sim wait-for --element 'a[href*="signin/Xchange"]' --timeout 60

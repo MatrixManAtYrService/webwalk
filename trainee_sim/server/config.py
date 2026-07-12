@@ -48,6 +48,11 @@ class Settings:
     # If empty, we launch a local Chrome via Selenium Manager on the server.
     webdriver_url: str = os.environ.get("TS_WEBDRIVER_URL", "")
 
+    # Path to the Chromium-family binary to drive (Chrome, Chromium, Brave,
+    # Edge, …). Empty = let Selenium find the default Chrome. Any of these speak
+    # CDP, so network capture works the same across them.
+    browser_binary: str = os.environ.get("TS_BROWSER_BINARY", "")
+
     # Where the browser starts — the training entry point / login page. The
     # human drives auth from here before telemetry is turned on.
     start_url: str = os.environ.get("TS_START_URL", "about:blank")

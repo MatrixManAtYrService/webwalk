@@ -73,6 +73,10 @@ class BrowserSession:
         options = Options()
         if SETTINGS.headless:
             options.add_argument("--headless=new")
+        if SETTINGS.browser_binary:
+            # Drive a specific Chromium-family binary (Brave/Chromium/Edge/pinned
+            # Chrome). All speak CDP, so network capture behaves identically.
+            options.binary_location = SETTINGS.browser_binary
 
         if SETTINGS.network_capture:
             # Network capture rides on Chrome's performance log: a pull-based
