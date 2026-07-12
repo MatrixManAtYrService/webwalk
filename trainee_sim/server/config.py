@@ -75,6 +75,14 @@ class Settings:
     # Per-body size cap (bytes) — bodies larger than this are truncated.
     network_max_body_bytes: int = field(default_factory=lambda: int(os.environ.get("TS_NETWORK_MAX_BODY", "65536")))
 
+    # --- in-page fetch (fetch_in_page / http rule actions) ---
+    #
+    # Requests fired from inside the logged-in page (so they carry its session)
+    # against the training's own API — the rule-runner's UI→API ratchet. Rate
+    # limited so an automated walk can't hammer a live corporate LMS.
+    fetch_min_interval_s: float = field(default_factory=lambda: float(os.environ.get("TS_FETCH_MIN_INTERVAL", "0.75")))
+    fetch_jitter_s: float = field(default_factory=lambda: float(os.environ.get("TS_FETCH_JITTER", "0.25")))
+
     @property
     def captures_dir(self) -> Path:
         return self.data_dir / "captures"

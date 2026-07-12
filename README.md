@@ -128,9 +128,16 @@ from anywhere.
 
 **Network capture** has landed (see below and `docs/network-capture-design.md`):
 each step now records the API traffic it produced, the groundwork for rules that
-fire requests directly instead of puppeting the UI. Still to come (see `docs/`):
-a rule runner (state → action), reusable parameterized sub-flows (the "log in as
-Alice" macro), and API *replay* built on the captured request shapes.
+fire requests directly instead of puppeting the UI.
+
+**Next: the rule runner** — `docs/rule-runner-design.md`. It turns the state
+signatures (the `when`) + actions (`do`) into a graph the engine *walks*:
+observe → match state → act (UI **or** API) → verify → repeat, from any starting
+point (so a half-finished course resumes rather than restarts), preferring the
+API where a captured request shape exists and falling back to the UI otherwise.
+The endgame is proving the training has **no dead ends** — every state can reach
+the end. Reusable parameterized sub-flows (the "log in as Alice" macro) live here
+too. Read that doc before starting that work.
 
 ## Command reference
 
@@ -164,6 +171,7 @@ Actions share: `--window`, `--frame`, `--by css\|xpath`, `--settle`,
 | `TS_DATA_DIR` | Server-side captures + browser profile | `~/.local/share/trainee-sim` |
 | `TS_LOCAL_DATA_DIR` | Client-side fetched captures | `./data` |
 | `TS_BROWSER_PROFILE` | Override the persistent Chrome profile dir | `$TS_DATA_DIR/browser-profile` |
+| `TS_BROWSER_BINARY` | Chromium-family binary to drive (Chrome/Chromium/Brave/Edge) | *(default Chrome)* |
 | `TS_HEADLESS` | Headless browser (unattended replay only; login needs headed) | off |
 | `TS_TIMEOUT` | Client HTTP timeout (seconds) | 120 |
 | `TS_NETWORK_CAPTURE` | Enable Chrome's perf log for network capture | on |
@@ -181,11 +189,15 @@ Actions share: `--window`, `--frame`, `--by css\|xpath`, `--settle`,
 - `trainee_sim/engine/` — the matcher (`matcher.py`); rule runner to come.
 - `courses/` — per-course state signatures (and rules, eventually).
 - `login.nu` — worked example: scripted login to the Secure Code Warrior course.
-- `docs/` — design docs.
+- `docs/` — design docs: `network-capture-design.md` (shipped) and
+  `rule-runner-design.md` (the next build — read before starting the engine).
 
 ## Status
 
-Working: the client/server spine, telemetry gate, window + nested-frame handling,
+Working (validated end-to-end against the real Secure Code Warrior training):
+the client/server spine, telemetry gate, window + nested-frame handling,
 scriptable actions with settle/readable-errors, local capture fetch, the
-"where am I" state detector, and gated network (API) capture. Next: the rule
-runner and API replay.
+"where am I" state detector, and gated network (API) capture — including SCW's
+REST calls *and* its Phoenix websocket. Next: the **rule runner**
+(`docs/rule-runner-design.md`) — walk the state graph, UI or API, from any
+starting point, toward proving there are no dead ends.

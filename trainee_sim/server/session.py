@@ -54,6 +54,10 @@ class BrowserSession:
     def __init__(self) -> None:
         self._driver: WebDriver | None = None
         self._lock = asyncio.Lock()
+        # Throttle for in-page fetches (fetch_in_page): one at a time, spaced out,
+        # so an automated walk stays gentle on a live LMS. See _throttle_fetch.
+        self._fetch_lock = asyncio.Lock()
+        self._last_fetch_ts = 0.0
         self.capture = Capture(SETTINGS.captures_dir, enabled=False)
         # Sibling to `capture`: records the training's API traffic, gated by the
         # same telemetry flag. See docs/network-capture-design.md.
@@ -626,6 +630,107 @@ class BrowserSession:
         first_line = reason.splitlines()[0] if reason else type(exc).__name__
         where = f" in frame {frame}" if frame else ""
         return f"could not {action} {by}={selector!r}{where}: {type(exc).__name__}: {first_line}"
+
+    # --- in-page fetch (the UI→API ratchet) ---
+    #
+    # Fire a request from *inside* the logged-in page (driver.execute_async_script
+    # → window.fetch with credentials), so it carries the page's real session
+    # against the training's own API. This is how a rule can hit the API directly
+    # instead of puppeting the UI — mirroring finmap's `session.fetch_json`. The
+    # request shapes come from the network recorder (docs/network-capture-design).
+    #
+    # Auth note: `credentials: 'include'` carries cookies. If the API instead
+    # wants a bearer token the SPA holds in JS, pass it via `headers`
+    # (Authorization). We probe with a safe GET before trusting it for writes.
+
+    async def _throttle_fetch(self) -> None:
+        """Serialize in-page fetches and space them out (interval + jitter)."""
+        import random
+        import time
+
+        async with self._fetch_lock:
+            wait = (self._last_fetch_ts + SETTINGS.fetch_min_interval_s) - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if SETTINGS.fetch_jitter_s > 0:
+                await asyncio.sleep(random.uniform(0, SETTINGS.fetch_jitter_s))
+            self._last_fetch_ts = time.monotonic()
+
+    # The page-side fetch. arguments[0..3] are url/method/headers/body; Selenium
+    # appends the async callback as the final argument. We never throw for a
+    # non-2xx — the caller inspects `status`/`ok` — only for a thrown fetch (e.g.
+    # network/CORS), which comes back as {ok:false, status:0, error}.
+    _FETCH_JS = """
+        const url = arguments[0], method = arguments[1];
+        const headers = arguments[2] || {}, body = arguments[3];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+            try {
+                const opts = { method, headers, credentials: 'include' };
+                if (body !== null && body !== undefined) opts.body = body;
+                const r = await fetch(url, opts);
+                const text = await r.text();
+                done({ ok: r.ok, status: r.status, body: text });
+            } catch (e) {
+                done({ ok: false, status: 0, error: String(e) });
+            }
+        })();
+    """
+
+    def _fetch_in_page_sync(
+        self,
+        driver: WebDriver,
+        url: str,
+        method: str,
+        headers: dict[str, str],
+        body: str | None,
+        timeout: float,
+    ) -> dict[str, Any]:
+        # Run in the top document (the SCW SPA's origin), not whatever frame a
+        # previous action left us in — the API is same-origin with the top page.
+        driver.switch_to.default_content()
+        driver.set_script_timeout(timeout)
+        result = driver.execute_async_script(self._FETCH_JS, url, method, headers, body) or {}
+        raw = result.get("body")
+        parsed: Any = raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, TypeError):
+                parsed = raw  # non-JSON body; hand back the text
+        return {
+            "url": url,
+            "method": method,
+            "status": result.get("status"),
+            "ok": result.get("ok", False),
+            "error": result.get("error"),
+            "body": parsed,
+        }
+
+    async def fetch_in_page(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body: Any = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Issue `method url` from inside the page and return {status, ok, body}.
+
+        `body` may be a string (sent as-is) or JSON-able (serialized, with a
+        JSON content-type unless one is given). Rate limited. The call also shows
+        up in the network recorder, so telemetry corroborates what went out.
+        """
+        driver = await self._ready()
+        hdrs = {k: v for k, v in (headers or {}).items()}
+        if body is not None and not isinstance(body, str):
+            body = json.dumps(body)
+        if body is not None and not any(k.lower() == "content-type" for k in hdrs):
+            hdrs["content-type"] = "application/json"
+        await self._throttle_fetch()
+        result = await asyncio.to_thread(self._fetch_in_page_sync, driver, url, method.upper(), hdrs, body, timeout)
+        logger.info("fetch_in_page", method=method.upper(), url=url, status=result.get("status"), ok=result.get("ok"))
+        return result
 
     async def act(
         self,

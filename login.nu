@@ -56,27 +56,37 @@ uv run trainee-sim click --window latest --by xpath --element '//button[normaliz
 uv run trainee-sim wait-for --window latest --frame "3/1" --by xpath --element '//button[normalize-space(.)="Launch Course"]' --timeout 60
 uv run trainee-sim click --window latest --frame "3/1" --by xpath --element '//button[normalize-space(.)="Launch Course"]'
 
-# New tab: Secure Code Warrior. Email-first SSO login (uses the Clover email).
-uv run trainee-sim wait-for --window latest --element "input#email" --timeout 60
-uv run trainee-sim click --window latest --by xpath --element '//button[normalize-space(.)="Deny Non-Essential"]'
-uv run trainee-sim type $env.CLOVER_EMAIL --window latest --into "input#email"
-# Target the Next button by its stable attribute, NOT visible text: CSS lowercases
-# the label ("next") but the DOM text is "Next", so a text selector wouldn't match.
-uv run trainee-sim click --window latest --element 'button[translate="NEXT"]'
+# New tab: Secure Code Warrior. If the Microsoft session is already authenticated,
+# SCW single-signs-on STRAIGHT to the course list — no email form, no MFA. So the
+# whole SCW login is best-effort: run it only if the email form actually shows up,
+# and let `try` fall through otherwise. Both paths converge on the course-list URL.
+try {
+    uv run trainee-sim wait-for --window latest --element "input#email" --timeout 15
+    # Dismiss the cookie banner if it's showing — non-fatal (its own `try`), since
+    # the persistent profile may have already dealt with it.
+    try { uv run trainee-sim click --window latest --by xpath --element '//button[normalize-space(.)="Deny Non-Essential"]' }
+    uv run trainee-sim type $env.CLOVER_EMAIL --window latest --into "input#email"
+    # Target the Next button by its stable attribute, NOT visible text: CSS
+    # lowercases the label ("next") but the DOM text is "Next".
+    uv run trainee-sim click --window latest --element 'button[translate="NEXT"]'
 
-# Next triggers SAML SSO back to Microsoft, which prompts for an MFA code.
-# Wait for that prompt, then hand off to the human — the code comes from an
-# authenticator app and cannot (and should not) be scripted.
-uv run trainee-sim wait-for --window latest --element "input#idTxtBx_SAOTCC_OTC" --timeout 90
-print ""
-print "  ============================================================"
-print "  ENTER YOUR MFA CODE in the browser on the target machine,"
-print "  then submit it. Secure Code Warrior will load the course."
-print "  ============================================================"
-print ""
-# Block through the manual MFA until Secure Code Warrior lands on the course's
-# language list (the "Supported Languages" page). The generous timeout covers
-# the time it takes the human to enter the code + the SSO redirects.
+    # Next triggers SAML SSO back to Microsoft, which MAY prompt for an MFA code
+    # (from an authenticator app — it can't and shouldn't be scripted). If the
+    # prompt appears, tell the human; the final wait below blocks through the
+    # manual entry. If MFA isn't required, this inner `try` just falls through.
+    try {
+        uv run trainee-sim wait-for --window latest --element "input#idTxtBx_SAOTCC_OTC" --timeout 20
+        print ""
+        print "  ============================================================"
+        print "  ENTER YOUR MFA CODE in the browser on the target machine,"
+        print "  then submit it. Secure Code Warrior will load the course."
+        print "  ============================================================"
+        print ""
+    }
+}
+
+# Both paths converge here: SCW lands on the course's language list. The generous
+# timeout covers a manual MFA entry + the SSO redirects (or an instant SSO).
 uv run trainee-sim wait-for --window latest --url "courses/course-list" --timeout 180
 print ""
 print "  Secure Code Warrior course is loaded. You're in."

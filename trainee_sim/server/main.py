@@ -184,6 +184,34 @@ async def step(body: StepBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
+class FetchBody(BaseModel):
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] | None = None
+    body: Any = None  # str sent as-is; anything else JSON-encoded
+    timeout: float = 30.0
+
+
+@app.post("/fetch")
+async def fetch(body: FetchBody) -> dict[str, Any]:
+    """Fire a request from inside the logged-in page (carries its session).
+
+    The training's own API, hit directly instead of via the UI — the rule
+    runner's UI→API ratchet. Non-2xx responses come back normally (inspect
+    `status`/`ok`); a thrown fetch surfaces as `ok:false, status:0, error`.
+    """
+    try:
+        return await SESSION.fetch_in_page(
+            url=body.url,
+            method=body.method,
+            headers=body.headers,
+            body=body.body,
+            timeout=body.timeout,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
 @app.get("/network")
 async def network(since: float | None = None) -> dict[str, Any]:
     """Debug view of the network recorder: state + currently buffered events.

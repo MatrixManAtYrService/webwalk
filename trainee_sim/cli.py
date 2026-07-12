@@ -461,6 +461,121 @@ def where(
         raise typer.Exit(1)
 
 
+def _frame_to_str(frame: Any) -> str | None:
+    """Turn a YAML frame path ([0] or [3,1]) into the '/'-joined string /step wants."""
+    if frame is None:
+        return None
+    if isinstance(frame, list):
+        return "/".join(str(s) for s in frame)
+    return str(frame)
+
+
+@app.command()
+def run(
+    to: Annotated[str, typer.Option(help="Walk until we reach this state id (else run until no rule applies)")] = "",
+    states: Annotated[str, typer.Option(help="YAML file of state signatures + rules")] = "courses/secure-code-warrior.yaml",  # noqa: E501
+    window: Annotated[str, typer.Option(help="Observe/act on this window (index/'latest'/url substring)")] = "",
+    once: Annotated[bool, typer.Option(help="Take a single step, then stop")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't prompt before each step (autonomous)")] = False,
+) -> None:
+    """Walk the course state graph: observe → match → act → verify, resumable.
+
+    The engine (engine/runner.py) observes the live browser, matches the current
+    state, runs an applicable rule (from the `rules:` in the states file), then
+    re-observes to check it landed where the rule expected. It resumes from
+    wherever the browser actually is. A rule with no `expect` is a discovery
+    step: the runner reports where it landed so you can add that state's
+    signature. Telemetry should be ON so each step's capture records the traffic.
+
+    \b
+    Examples:
+        trainee-sim run --once            # take one step (e.g. click Resume), confirm first
+        trainee-sim run --to scw-task -y  # walk toward a goal, no prompts
+    """
+    import yaml
+
+    from trainee_sim.engine.runner import Runner
+
+    states_path = Path(states)
+    if not states_path.exists():
+        typer.echo(f"States file not found: {states_path}", err=True)
+        raise typer.Exit(1)
+    doc = yaml.safe_load(states_path.read_text()) or {}
+    state_defs = doc.get("states", [])
+    rule_defs = doc.get("rules", [])
+    if not rule_defs:
+        typer.echo(f"No rules in {states_path} — add a `rules:` block.", err=True)
+        raise typer.Exit(1)
+
+    def observe() -> dict[str, Any]:
+        result = _call("/observe", json={"label": "run", "window": window or None})
+        return (result.get("record") or {}).get("state") or {}
+
+    def act(ui: dict[str, Any]) -> None:
+        result = _call(
+            "/step",
+            json={
+                "action": ui.get("action"),
+                "selector": ui.get("selector"),
+                "value": ui.get("value"),
+                "by": ui.get("by", "css"),
+                "label": ui.get("label") or "rule",
+                "window": window or None,
+                "frame": _frame_to_str(ui.get("frame")),
+                "settle": ui.get("settle", 0.0),
+                "wait_after": ui.get("wait_after"),
+                "wait_after_timeout": ui.get("wait_after_timeout", 10.0),
+            },
+        )
+        if result.get("error"):
+            raise typer.Exit(1)
+
+    def confirm(state_id: str, rule: dict[str, Any]) -> bool:
+        action = (rule.get("do", {}).get("ui", {}) or {}).get("action", "?")
+        return typer.confirm(f"[{state_id}] run rule '{rule['id']}' ({action})?", default=True)
+
+    runner = Runner(state_defs, rule_defs, observe, act, confirm=confirm)
+    result = runner.run(to=to or None, max_steps=1 if once else 20, auto=yes)
+    typer.echo(json.dumps(result, indent=2, default=str))
+    if result.get("status") in ("unknown", "ambiguous", "unexpected", "stuck"):
+        raise typer.Exit(1)
+
+
+@app.command()
+def fetch(
+    url: Annotated[str, typer.Argument(help="URL to request (the training's own API)")],
+    method: Annotated[str, typer.Option(help="HTTP method")] = "GET",
+    data: Annotated[str, typer.Option(help="Request body — a raw string (JSON string sends as JSON)")] = "",
+    header: Annotated[list[str], typer.Option("--header", "-H", help="Extra header 'Name: value' (repeatable)")] = [],  # noqa: B006
+) -> None:
+    """Fire a request from inside the logged-in page (carries its session).
+
+    The UI→API ratchet: hit the training's API directly instead of puppeting the
+    UI. Runs in the top document's origin with credentials, so a same-origin API
+    gets the page's cookies. If the API wants a bearer token, pass it with -H
+    'Authorization: Bearer …'. Non-2xx comes back normally (see `status`/`ok`).
+
+    \b
+    Examples:
+        trainee-sim fetch https://portal-api.securecodewarrior.com/ping
+        trainee-sim fetch .../taskAttempt/<id>/answer --method POST --data '{}'
+    """
+    headers: dict[str, str] = {}
+    for h in header:
+        if ":" not in h:
+            typer.echo(f"Bad --header {h!r}; use 'Name: value'.", err=True)
+            raise typer.Exit(1)
+        name, value = h.split(":", 1)
+        headers[name.strip()] = value.strip()
+    result = _call(
+        "/fetch",
+        json={"url": url, "method": method, "headers": headers or None, "body": data or None},
+    )
+    typer.echo(json.dumps(result, indent=2, default=str))
+    if not result.get("ok"):
+        raise typer.Exit(1)
+
+
 @app.command()
 def shutdown() -> None:
     """Close the browser session on the server."""

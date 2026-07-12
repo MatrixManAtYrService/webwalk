@@ -57,3 +57,46 @@ states:
     url_contains: /breakdown/
     elements:
       - { frame: [0], text: Resume }
+
+  # An in-course activity (video/code/quiz). Discovered by running `resume-course`
+  # from the breakdown: Resume drops you into the current task. Keyed on the stable
+  # /course-task/ URL; task subtypes (Video/…) can be split out later if a rule
+  # needs to tell them apart. The title here was "Video | Courses | …".
+  - id: scw-course-task
+    url_contains: /course-task/
+
+# Rules describe how to move between states: in state `when`, do `do`, and expect
+# to land in `expect`. The rule runner (engine/runner.py) observes → matches the
+# `when` → acts → re-observes to verify. `expect` is optional: omit it while the
+# destination state is still undiscovered — the runner reports where the action
+# actually landed so its signature can be added above. See docs/rule-runner-design.md.
+rules:
+  # Resume the training from the course-breakdown page. The button has no id, so
+  # target it by text — case-insensitively, because XPath matches the raw DOM text
+  # (which may differ in case from the CSS-rendered "Resume"; see the README).
+  - id: resume-course
+    when: scw-course-breakdown
+    do:
+      ui:
+        action: click
+        frame: [0]
+        by: xpath
+        selector: '//button[contains(translate(normalize-space(.), "RESUME", "resume"), "resume")]'
+        settle: 3          # SPA needs a moment to load the resumed activity
+    expect: scw-course-task   # discovered by running this rule: Resume → the current task
+
+  # Advance to the next activity. NOTE: Continue is disabled until the task is
+  # complete (for a video, until it's watched to the end — see
+  # docs/video-gate-hypothesis.md). This rule only succeeds when it's enabled;
+  # against a disabled button it returns a readable 422 and the walk stops. Case-
+  # insensitive text match for the same DOM-vs-rendered reason as resume-course.
+  - id: continue-task
+    when: scw-course-task
+    do:
+      ui:
+        action: click
+        frame: [0]
+        by: xpath
+        selector: '//button[contains(translate(normalize-space(.), "CONTINUE", "continue"), "continue")]'
+        settle: 3
+    # expect: (unknown) — discover the next activity by running this rule.
