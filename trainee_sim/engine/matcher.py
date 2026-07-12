@@ -38,9 +38,9 @@ def element_matches(pred: dict[str, Any], el: dict[str, Any]) -> bool:
         return False
     if "aria_contains" in pred and str(pred["aria_contains"]).lower() not in (el.get("aria_label") or "").lower():
         return False
-    if "href_contains" in pred and str(pred["href_contains"]).lower() not in (el.get("href") or "").lower():
-        return False
-    return True
+    return not (
+        "href_contains" in pred and str(pred["href_contains"]).lower() not in (el.get("href") or "").lower()
+    )
 
 
 def state_matches(sig: dict[str, Any], payload: dict[str, Any]) -> bool:

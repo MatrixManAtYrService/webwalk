@@ -22,6 +22,23 @@ def _data_dir() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "trainee-sim"
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes")
+
+
+def _network_hosts() -> tuple[str, ...]:
+    """Comma-separated substrings the request host must contain to be recorded.
+
+    Empty (the default) means "no host filter" — resource-type filtering
+    (xhr/fetch/websocket only) already trims most of the CDN/telemetry noise.
+    """
+    raw = os.environ.get("TS_NETWORK_HOSTS", "")
+    return tuple(h.strip() for h in raw.split(",") if h.strip())
+
+
 @dataclass
 class Settings:
     data_dir: Path = field(default_factory=_data_dir)
@@ -38,6 +55,20 @@ class Settings:
     # Auth must be headed (a human logs in), so the browser is headed by
     # default. Set TS_HEADLESS=1 only for unattended replay of captured flows.
     headless: bool = os.environ.get("TS_HEADLESS", "").lower() in ("1", "true", "yes")
+
+    # --- network capture (see docs/network-capture-design.md) ---
+    #
+    # Records the training's API traffic alongside each step, so rules can
+    # eventually fire requests directly instead of puppeting the UI. Enabling it
+    # turns on Chrome's performance log at browser-build time; the telemetry gate
+    # still decides whether anything is *retained* (auth traffic is never kept).
+    network_capture: bool = field(default_factory=lambda: _env_flag("TS_NETWORK_CAPTURE", True))
+    # Only record requests whose host contains one of these (empty = no filter).
+    network_hosts: tuple[str, ...] = field(default_factory=_network_hosts)
+    # Ring-buffer cap: newest events win so a long session stays bounded.
+    network_max_events: int = field(default_factory=lambda: int(os.environ.get("TS_NETWORK_MAX_EVENTS", "500")))
+    # Per-body size cap (bytes) — bodies larger than this are truncated.
+    network_max_body_bytes: int = field(default_factory=lambda: int(os.environ.get("TS_NETWORK_MAX_BODY", "65536")))
 
     @property
     def captures_dir(self) -> Path:

@@ -21,12 +21,14 @@ worker thread with asyncio.to_thread to keep the FastAPI event loop responsive.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from trainee_sim.server.capture import Capture
 from trainee_sim.server.config import SETTINGS
+from trainee_sim.server.recorder import NetworkRecorder
 
 if TYPE_CHECKING:
     from selenium.webdriver.remote.webdriver import WebDriver
@@ -53,6 +55,14 @@ class BrowserSession:
         self._driver: WebDriver | None = None
         self._lock = asyncio.Lock()
         self.capture = Capture(SETTINGS.captures_dir, enabled=False)
+        # Sibling to `capture`: records the training's API traffic, gated by the
+        # same telemetry flag. See docs/network-capture-design.md.
+        self.network = NetworkRecorder(
+            hosts=SETTINGS.network_hosts,
+            max_events=SETTINGS.network_max_events,
+            max_body_bytes=SETTINGS.network_max_body_bytes,
+            enabled=False,
+        )
 
     # --- lifecycle ---
 
@@ -63,6 +73,17 @@ class BrowserSession:
         options = Options()
         if SETTINGS.headless:
             options.add_argument("--headless=new")
+
+        if SETTINGS.network_capture:
+            # Network capture rides on Chrome's performance log: a pull-based
+            # stream of CDP Network.* events we drain per snapshot. It must be
+            # switched on at build time (there's no toggling it live) — but the
+            # telemetry gate still decides whether anything is *retained*, so
+            # enabling it here doesn't record auth. See recorder.py.
+            options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+            options.add_experimental_option(
+                "perfLoggingPrefs", {"enableNetwork": True, "enablePage": False}
+            )
 
         if SETTINGS.webdriver_url:
             logger.info("connecting_remote_webdriver", url=SETTINGS.webdriver_url)
@@ -179,10 +200,11 @@ class BrowserSession:
         # Probe rather than trust the reference: the browser may have been closed
         # since it was created. _focus_live_window re-homes onto a surviving tab
         # if the focused one was closed, so status stays truthful either way.
-        connected = self._driver is not None and await asyncio.to_thread(self._focus_live_window, self._driver)
-        if connected:
+        driver = self._driver
+        connected = driver is not None and await asyncio.to_thread(self._focus_live_window, driver)
+        if connected and driver is not None:  # second check narrows driver for the probe
             try:
-                url, title = await asyncio.to_thread(lambda: (self._driver.current_url, self._driver.title))
+                url, title = await asyncio.to_thread(lambda d=driver: (d.current_url, d.title))
             except Exception as exc:
                 logger.warning("status_probe_failed", error=str(exc))
         return {
@@ -191,6 +213,8 @@ class BrowserSession:
             "current_url": url,
             "title": title,
             "steps_recorded": self.capture.sequence,
+            "network_capture": self.network.enabled,
+            "network_buffered": len(self.network.peek()),
         }
 
     async def shutdown(self) -> None:
@@ -271,9 +295,82 @@ class BrowserSession:
     async def set_telemetry(self, on: bool) -> dict[str, Any]:
         if on:
             self.capture.enable()
+            # Discard whatever network traffic Chrome buffered while the gate was
+            # closed (the manual auth) BEFORE we start retaining — so no SSO/SAML
+            # request can carry over into the first recorded step.
+            if self._driver is not None:
+                await asyncio.to_thread(self._flush_network_backlog, self._driver)
+            self.network.enable()
         else:
             self.capture.disable()
+            self.network.disable()
         return {"status": "ok", "telemetry": self.capture.enabled}
+
+    # --- network capture ---
+    #
+    # Selenium has no live network-event API (finmap gets that free from
+    # Playwright), so we pull CDP Network.* events off Chrome's performance log
+    # and fold them into the recorder. Reading the log drains it, which is
+    # exactly the "events since the previous snapshot" model we want: each
+    # snapshot pumps, then attaches the drained events to its capture.
+
+    @staticmethod
+    def _read_perf_messages(driver: WebDriver) -> list[dict[str, Any]]:
+        """Drain Chrome's performance log into a list of raw CDP messages.
+
+        Each perf-log entry wraps a CDP message as a JSON string; we unwrap to
+        the `{"method": …, "params": …}` the recorder ingests. Best-effort: a
+        driver without perf logging (some Grids) just yields nothing.
+        """
+        try:
+            # get_log lives on Chromium drivers, not the base WebDriver type — the
+            # try/except also covers a non-Chrome Grid that lacks it entirely.
+            entries = driver.get_log("performance")  # ty: ignore[unresolved-attribute]
+        except Exception:
+            return []
+        messages: list[dict[str, Any]] = []
+        for entry in entries:
+            try:
+                messages.append(json.loads(entry["message"])["message"])
+            except (KeyError, ValueError, TypeError):
+                continue
+        return messages
+
+    def _flush_network_backlog(self, driver: WebDriver) -> None:
+        """Read and discard the perf-log backlog (used when opening the gate)."""
+        self._read_perf_messages(driver)
+
+    def _pump_network_sync(self, driver: WebDriver) -> None:
+        """Fold new CDP events into the recorder and fetch any JSON bodies.
+
+        No-op-ish while telemetry is off: we still drain the perf log (so it
+        can't overflow and so nothing stale survives), but the recorder ignores
+        it and keeps its buffer empty.
+        """
+        messages = self._read_perf_messages(driver)
+        if not self.network.enabled:
+            return
+        for request_id in self.network.ingest(messages):
+            try:
+                result = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": request_id})
+                self.network.attach_body(request_id, result.get("body"), result.get("base64Encoded", False))
+            except Exception:
+                # Body already evicted from Chrome's buffer, or CDP unavailable
+                # (Grid). The metadata event still stands; just no body.
+                self.network.attach_body(request_id, None)
+
+    async def network_events(self) -> dict[str, Any]:
+        """Pump and return the currently buffered events (non-destructive peek).
+
+        Backs the `/network` debug endpoint — a way to see traffic without
+        taking a full step. It does NOT drain, so a following observe/step still
+        gets these events attached to its capture.
+        """
+        stats = self.network.stats()
+        if self._driver is not None and await asyncio.to_thread(self._focus_live_window, self._driver):
+            await asyncio.to_thread(self._pump_network_sync, self._driver)
+            stats = self.network.stats()
+        return {**stats, "events": self.network.peek()}
 
     # --- frames / iframes ---
     #
@@ -311,7 +408,12 @@ class BrowserSession:
     # --- observation ---
 
     def _collect_elements(
-        self, driver: WebDriver, frame_path: list[int], elements: list[dict[str, Any]], frames: list[dict[str, Any]], depth: int
+        self,
+        driver: WebDriver,
+        frame_path: list[int],
+        elements: list[dict[str, Any]],
+        frames: list[dict[str, Any]],
+        depth: int,
     ) -> None:
         """Append this frame's interactive elements (tagged with frame_path),
         then recurse into child frames."""
@@ -365,12 +467,17 @@ class BrowserSession:
         frames: list[dict[str, Any]] = []
         self._collect_elements(driver, [], elements, frames, depth=0)
         driver.switch_to.default_content()
+        # Pump the network recorder and hand this step the traffic since the last
+        # snapshot. Empty while telemetry is off (the recorder ignores it). Frame
+        # focus is irrelevant here — CDP Network events are per-target.
+        self._pump_network_sync(driver)
         return {
             "url": driver.current_url,
             "title": driver.title,
             "elements": elements,
             "frames": frames,  # the nested-frame map (empty if the page has none)
             "dom": driver.page_source,  # top document only (frames listed above)
+            "network": self.network.drain(),  # API traffic this step produced
             # Record the whole window set with each step, so a capture shows what
             # other tabs were open (and which one this snapshot is of).
             "windows": self._list_windows_sync(driver),
@@ -584,6 +691,7 @@ def _step_summary(path: str | None, telemetry: bool, state: dict[str, Any]) -> d
         "url": state["url"],
         "title": state["title"],
         "element_count": len(state["elements"]),
+        "network_count": len(state.get("network") or []),
     }
 
 

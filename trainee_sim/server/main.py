@@ -184,6 +184,17 @@ async def step(body: StepBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
+@app.get("/network")
+async def network() -> dict[str, Any]:
+    """Debug view of the network recorder: state + currently buffered events.
+
+    Pumps the recorder and returns a non-destructive peek, so you can inspect
+    the training's API traffic without taking a full observe/step. Empty while
+    telemetry is off (nothing is retained during auth).
+    """
+    return await SESSION.network_events()
+
+
 @app.post("/wait")
 async def wait(body: WaitBody) -> dict[str, Any]:
     try:

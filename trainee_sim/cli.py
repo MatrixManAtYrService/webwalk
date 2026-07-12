@@ -9,6 +9,7 @@
   trainee-sim status           connection + telemetry state
   trainee-sim observe          capture the current browser state as a step
   trainee-sim step             inject an action (click/type/navigate) + capture
+  trainee-sim network          show captured training API traffic (gated)
   trainee-sim check            is the server up?
 
 The server usually runs on another machine on the LAN. Point at it with
@@ -65,7 +66,7 @@ def check(timeout: Annotated[float, typer.Option(help="Seconds to wait")] = 5.0)
         resp = httpx.get(url, timeout=timeout)
         typer.echo(json.dumps({"healthy": resp.status_code == 200, "url": url, "body": resp.json()}))
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        typer.echo(json.dumps({"healthy": False, "url": url, "error": type(exc).__name__}))
+        typer.echo(json.dumps({"healthy": False, "url": url, "error": exc.__class__.__name__}))
         raise typer.Exit(1)
 
 
@@ -148,6 +149,19 @@ def telemetry(
 def status() -> None:
     """Show connection + telemetry state."""
     _request("/session/status", method="GET")
+
+
+@app.command()
+def network() -> None:
+    """Show the captured training API traffic (requests/responses + ws frames).
+
+    A debug view of the network recorder: prints the events buffered since the
+    last observe/step, without consuming them. Empty while telemetry is off —
+    network capture is gated by the same telemetry switch, so auth traffic is
+    never recorded. The full per-request bodies also ride along inside each
+    `observe`/`step` capture (a `network` key alongside `elements`/`dom`).
+    """
+    _request("/network", method="GET")
 
 
 @app.command()
@@ -266,7 +280,9 @@ def type(  # noqa: A001 — the CLI verb really is "type"
     value: Annotated[str, typer.Argument(help="Text to type (omit if using --env)")] = "",
     into: Annotated[str, typer.Option("--into", help="Selector of the field to type into")] = "",
     by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
-    env: Annotated[str, typer.Option(help="Read the value from this env var instead (keeps it out of shell history)")] = "",
+    env: Annotated[
+        str, typer.Option(help="Read the value from this env var instead (keeps it out of shell history)")
+    ] = "",
     secret: Annotated[bool, typer.Option(help="Redact the value everywhere it's recorded (use for passwords)")] = False,
     label: Annotated[str, typer.Option(help="Short label for this step")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
