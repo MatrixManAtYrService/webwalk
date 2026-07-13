@@ -229,6 +229,8 @@ async def eval_endpoint(body: EvalBody) -> dict[str, Any]:
     """Run JS in the page and return its JSON-able result (introspection)."""
     try:
         return await SESSION.eval_js(script=body.script, args=body.args, frame=body.frame)
+    except ActionFailed as exc:
+        raise HTTPException(status_code=422, detail={"error": "action_failed", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 

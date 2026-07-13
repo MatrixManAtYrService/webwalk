@@ -414,9 +414,17 @@ class BrowserSession:
         from selenium.webdriver.common.by import By
 
         driver.switch_to.default_content()
-        for seg in frame:
+        for depth, seg in enumerate(frame):
             if isinstance(seg, int) or (isinstance(seg, str) and seg.lstrip("-").isdigit()):
                 frames = driver.find_elements(By.CSS_SELECTOR, self.FRAME_TAGS)
+                if not -len(frames) <= int(seg) < len(frames):
+                    # The frame isn't there (yet) — e.g. a code-server pod still booting,
+                    # so the nested iframe hasn't been inserted. Fail with a readable
+                    # message instead of an IndexError 500, so a caller can retry/settle.
+                    raise ActionFailed(
+                        f"frame path {frame!r}: no frame at index {seg} (segment {depth}); "
+                        f"only {len(frames)} frame(s) present here — is it still loading?"
+                    )
                 driver.switch_to.frame(frames[int(seg)])
             else:
                 driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, seg))
