@@ -589,8 +589,10 @@ class BrowserSession:
         value: str | None,
         by: str = "css",
         frame: list[Any] | None = None,
+        enter: bool = False,
     ) -> dict[str, Any]:
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
 
         if action == "navigate":
             if not value:
@@ -618,7 +620,11 @@ class BrowserSession:
             else:  # type
                 el.clear()
                 el.send_keys(value or "")
-            return {"action": action, "by": by, "selector": selector, "frame": frame}
+                if enter:
+                    # Submit — the mocked apps' simulated address bar / forms have no
+                    # click-target, so an explicit Enter is how they navigate.
+                    el.send_keys(Keys.ENTER)
+            return {"action": action, "by": by, "selector": selector, "frame": frame, "enter": enter}
         except Exception as exc:
             raise ActionFailed(self._describe_action_error(exc, action, by, selector, frame))
         finally:
@@ -798,6 +804,7 @@ class BrowserSession:
         settle: float = 0.0,
         wait_after: str | None = None,
         wait_after_timeout: float = 10.0,
+        enter: bool = False,
     ) -> dict[str, Any]:
         """Inject an action, capturing before/after state as one step.
 
@@ -819,7 +826,9 @@ class BrowserSession:
             await asyncio.to_thread(self._switch_sync, driver, window)
         parsed_frame = self._parse_frame(frame)
         before = await self.snapshot()
-        result = await asyncio.to_thread(self._perform_sync, driver, action, selector, value, by, parsed_frame)
+        result = await asyncio.to_thread(
+            self._perform_sync, driver, action, selector, value, by, parsed_frame, enter
+        )
         settled: dict[str, Any] | None = None
         if wait_after:
             settled = await asyncio.to_thread(

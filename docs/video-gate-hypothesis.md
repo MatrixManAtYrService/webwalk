@@ -1,74 +1,77 @@
-# Hypothesis: the video-task "Continue" gate (and its API bypass)
+# Video-task "Continue" gate — and its API bypass (CONFIRMED)
 
-Status: **hypothesis** — completion mechanism observed once (a "Video" task in
-the XSS/DOM course) and the *gate* confirmed to reproduce on a second video
-(Continue starts `enabled:false` again after `continue-task` advances to it). The
-API bypass itself is not yet tested — that needs `fetch_in_page` (M3). Captured
-via the record-manual method: a clean `observe` baseline, a human completing the
-video, then a second `observe` whose `network` key held the completion traffic
-(see `data/captures/00029/00030` and `data/network/00004`).
+Status: **confirmed**. A video task's Continue button is server-gated; firing the
+task's `/answer` endpoint marks it done **without playing the video**, and the
+course then progresses past it. Verified live on the XSS/DOM course: fired the
+call on an unwatched video → `200 {"status":"done"}` → re-entering the task
+advanced to the next activity (a Guideline task, Continue enabled).
 
-Current fixture: we are parked on **video #2** (module `318bc9fa…`, task
-`1e60b988…`), Continue disabled — ready for the bypass test below.
+## The mechanism
 
-## What we saw
+A video task (`/course-task/` URL, title "Video | …") keeps its frame-`[0]`
+**Continue** button `enabled:false` until the task's attempt is marked done.
 
-On a video task (`url … /course-task/…`, title "Video | …"), the frame-`[0]`
-**Continue** button starts **`enabled: false`**. It flips to `enabled: true` the
-moment the video is watched to the end. At that instant two SCW calls fire:
+Task open fires:
+```
+GET /courses/userCourse/{courseId}/language/{languageId}/module/{moduleId}/task/{taskId}/challenges
+→ 200 { taskAttemptId, taskType:"video", status:"in_progress", courseId, languageKey, … }
+```
+Completion (normally after watch-to-end) fires:
+```
+POST /courses/challenges/language/{languageId}/module/{moduleId}/taskAttempt/{taskAttemptId}/answer
+body: {}
+→ 200 { taskType:"video", points:100, status:"done", courseCompleted:false }
+```
+That POST is the gate. Firing it directly (no playback) marks the video done.
 
-1. **The gate** — marks the task done:
-   ```
-   POST /courses/challenges/language/{languageId}/module/{moduleId}/taskAttempt/{taskAttemptId}/answer
-   body: {}
-   → 200 {"taskType":"video","points":100,"status":"done","courseCompleted":false}
-   ```
-2. **Watch-time log** (probably *not* the gate, just analytics):
-   ```
-   POST /learning/log
-   body: {"learningresource":"…:xss:dom","totalduration":108.42,"playmode":"courses","courseId":"…"}
-   ```
+## Auth (this was the crux)
 
-The burst of Phoenix websocket `client_message` frames in the same window is a
-**red herring** — it's Userflow product-tour telemetry (`flowId`,
-`ToggleClientCondition`), unrelated to task completion.
+portal-api does **not** use cookies or a bearer token. It authenticates with a
+custom header **`X-Session-ID`**, whose value is **`localStorage.sessionId`** (a
+32-char id). Findings that led here:
 
-## The hypothesis
+- `GET /ping` (public) → 200; `GET /auth/resume` with cookies → **401**.
+- A bearer token pulled from the page was a red herring — it was **Coralogix's**
+  (`Bearer cxtp_…`), captured because RUM fires constantly. portal-api requests
+  carry **no** `Authorization` at all (confirmed from the real `/answer` request
+  headers: only `X-Session-ID`, `Content-Type`, `traceparent`, UA).
+- Adding an `Authorization` header makes the fetch fail CORS preflight
+  (`TypeError: Failed to fetch`) — portal-api's allow-headers doesn't include it.
+- `GET /auth/resume` with `X-Session-ID: localStorage.sessionId` → **200** (user
+  profile). That's the auth.
 
-**The `/answer` POST (body `{}`) is what marks a video done and ungates
-Continue.** If so, we can *bypass* "watch the whole video" by firing that request
-directly — an `http` rule (the rule-runner's M3 / network-capture's M4 ratchet)
-— then clicking Continue. No playback, no seeking.
+## How to reproduce (the tools we built)
 
-## The one unknown: where `taskAttemptId` comes from
+Both are in-page primitives on the server session (carry the real session):
+`trainee-sim fetch` (`fetch_in_page`) and `trainee-sim eval` (`eval_js`).
 
-The three path ids:
+```bash
+# 1. session id (auth):
+SID=$(trainee-sim eval "localStorage.sessionId" | jq -r .result)
+# 2. current task's attempt id + type:
+trainee-sim fetch ".../userCourse/{course}/language/{lang}/module/{mod}/task/{task}/challenges" \
+  -H "X-Session-ID: $SID"          # → taskAttemptId, taskType, status
+# 3. mark a video done (the bypass):
+trainee-sim fetch ".../courses/challenges/language/{lang}/module/{mod}/taskAttempt/{attempt}/answer" \
+  -X POST --data '{}' -H "X-Session-ID: $SID"   # → {"status":"done"}
+```
 
-| id            | source                                                        |
-|---------------|---------------------------------------------------------------|
-| `languageId`  | 2nd `/course-task/` URL segment (== the `/breakdown/` id)     |
-| `moduleId`    | 3rd `/course-task/` URL segment                               |
-| `taskAttemptId` | **not in the URL** — minted when the task opens (unknown)    |
+## Caveats
 
-`taskAttemptId` appeared only in the `/answer` call itself. It's presumably
-returned by a task-load GET (or lives in the breakdown JSON). We never captured
-that call — it fired inside the `resume-course` step's snapshot drain.
+- **UI lag (the Phoenix-websocket caveat).** An out-of-band `/answer` does **not**
+  instantly flip the DOM Continue button — the Angular app's client state is
+  unchanged, so Continue stays disabled until the app re-syncs. Re-entering the
+  task (Back to course → Resume) makes it re-fetch `/challenges`, see `done`, and
+  progress. So verify by **re-observing after a re-entry / navigation**, not by
+  watching the button change in place.
+- **`taskAttemptId` is per-open.** Re-GETting `/challenges` can mint a fresh
+  attempt id. Always read it immediately before the `/answer` POST.
+- `languageId`/`moduleId`/`taskId` are the 2nd/3rd/4th `/course-task/` URL
+  segments; `courseId` (the userCourse id) is the 1st.
 
-## Test plan for the next video
+## Next: codify as an `http` rule
 
-1. Reach a fresh video task with **telemetry on**.
-2. Before completing it, inspect the task-load traffic (`trainee-sim network`)
-   for a call whose response carries the `taskAttempt` / attempt id → confirms
-   the provenance and lets us template the URL.
-3. Fire the `/answer` POST directly (once `fetch_in_page` exists) and check
-   Continue goes `enabled: true` **without** playing — that confirms the bypass.
-4. Keep the "watch + click Continue" UI path as the labeled fallback.
-
-## Related open question (state model)
-
-The matcher can't yet tell "video not done" (Continue disabled) from "video done"
-(Continue enabled) — `element_matches` ignores the `enabled` flag. A `continue`
-rule is therefore only *safe* to fire once Continue is enabled. Two ways to model
-it: split `scw-course-task` into gated/done states (needs an `enabled` predicate
-in the matcher), or have the runner check enabled before clicking. This is the
-"already done / idempotency" concern from `rule-runner-design.md`.
+The runner has `fetch_in_page` but not yet a `do.http` action. A `video-advance`
+rule would: GET `/challenges` (extract `taskAttemptId`), POST `/answer`, then
+re-observe. Keep the "watch + click Continue" UI path as the labeled fallback
+(the API→UI ratchet). See `docs/rule-runner-design.md` M3.

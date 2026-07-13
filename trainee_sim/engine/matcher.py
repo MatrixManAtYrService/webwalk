@@ -43,23 +43,56 @@ def element_matches(pred: dict[str, Any], el: dict[str, Any]) -> bool:
     )
 
 
-def state_matches(sig: dict[str, Any], payload: dict[str, Any]) -> bool:
-    """True if the observe `payload` satisfies the state signature `sig`."""
+def explain_state(sig: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Match `sig` against `payload` and explain the outcome.
+
+    Returns `{"id", "matched", "signals", "reasons"}`:
+      - `matched`  — the same boolean `state_matches` returns;
+      - `signals`  — how many of the signature's checks *passed* (its
+        url/title substrings + element predicates), so a caller can rank
+        near-misses: a state that hit 2 of 3 signals is "closer" than one that
+        hit none — the difference between "loosen this signature" and "author a
+        new one";
+      - `reasons`  — a human-readable line per *failed* check, so a stuck agent
+        sees exactly why a plausible state didn't match ("no element matches
+        {'id': 'email'}").
+
+    This is the single source of truth for matching; `state_matches` and
+    `match_states` are thin wrappers over it.
+    """
     url = payload.get("url") or ""
     title = payload.get("title") or ""
     element_preds = sig.get("elements") or []
+    elements = payload.get("elements") or []
+
+    signals = 0
+    reasons: list[str] = []
+
+    if "url_contains" in sig:
+        if str(sig["url_contains"]).lower() in url.lower():
+            signals += 1
+        else:
+            reasons.append(f"url_contains {sig['url_contains']!r} not in url")
+    if "title_contains" in sig:
+        if str(sig["title_contains"]).lower() in title.lower():
+            signals += 1
+        else:
+            reasons.append(f"title_contains {sig['title_contains']!r} not in title")
+    for pred in element_preds:
+        if any(element_matches(pred, el) for el in elements):
+            signals += 1
+        else:
+            reasons.append(f"no element matches {pred!r}")
 
     # A signature needs at least one positive signal, or it would match anything.
-    if "url_contains" not in sig and "title_contains" not in sig and not element_preds:
-        return False
+    has_signal = "url_contains" in sig or "title_contains" in sig or bool(element_preds)
+    matched = has_signal and not reasons
+    return {"id": sig.get("id"), "matched": matched, "signals": signals, "reasons": reasons}
 
-    if "url_contains" in sig and str(sig["url_contains"]).lower() not in url.lower():
-        return False
-    if "title_contains" in sig and str(sig["title_contains"]).lower() not in title.lower():
-        return False
 
-    elements = payload.get("elements") or []
-    return all(any(element_matches(pred, el) for el in elements) for pred in element_preds)
+def state_matches(sig: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """True if the observe `payload` satisfies the state signature `sig`."""
+    return explain_state(sig, payload)["matched"]
 
 
 def match_states(states: list[dict[str, Any]], payload: dict[str, Any]) -> list[str]:
@@ -68,4 +101,9 @@ def match_states(states: list[dict[str, Any]], payload: dict[str, Any]) -> list[
     Ideally exactly one. Zero means "unknown" (add/loosen a signature); more than
     one means signatures overlap and should be tightened.
     """
-    return [s["id"] for s in states if "id" in s and state_matches(s, payload)]
+    return [r["id"] for r in match_report(states, payload) if r["matched"]]
+
+
+def match_report(states: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """`explain_state` for every id'd state — the input to near-miss diagnostics."""
+    return [explain_state(s, payload) for s in states if "id" in s]

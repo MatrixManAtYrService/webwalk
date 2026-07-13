@@ -140,6 +140,7 @@ class StepBody(BaseModel):
     settle: float = 0.0  # seconds to wait before the after-snapshot
     wait_after: str | None = None  # or: wait until this selector is visible first
     wait_after_timeout: float = 10.0
+    enter: bool = False  # for `type`: press Enter after typing (submit the field)
 
 
 class WaitBody(BaseModel):
@@ -177,6 +178,7 @@ async def step(body: StepBody) -> dict[str, Any]:
             settle=body.settle,
             wait_after=body.wait_after,
             wait_after_timeout=body.wait_after_timeout,
+            enter=body.enter,
         )
     except ActionFailed as exc:
         raise HTTPException(status_code=422, detail={"error": "action_failed", "message": str(exc)})

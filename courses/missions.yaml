@@ -1,0 +1,38 @@
+# Reusable mission STEP-rules — the "log in as Alice" macros.
+#
+# A mission (docs/mission-api.md) is a second observe→match→act→verify loop one
+# level down from the page-state graph: its "state" is the current forward step
+# (instruction[activeIndex] from the mission API) and its "rules" are the
+# parameterized step-handlers below.
+#
+# These are matched against the current step's OWN signature (its title /
+# description) — never against which mission we're in. Missions are near-copies
+# with a single value changed, so "Log in as {user}" recurs across the catalogue;
+# a handler authored once here must fire in EVERY mission that reuses that step.
+# That reuse is the whole point of a shared file: encode a step once, and every
+# mission that starts the same way runs hands-off.
+#
+# A step the engine can't match here stops the walk with context (the step text +
+# the app form) so the missing handler can be added — after which it, too, is
+# automatic everywhere. Add handlers as steps are discovered; only author what
+# we've actually observed (selectors/frames), the way we do for page states.
+
+steps:
+  # Log in to the mocked target app (Viking Bank). Fires on every login step —
+  # "Log in as Alice", "Log in as Bob", "Log in with an incorrect password" — the
+  # only difference being the credentials, which are the backtick-quoted tokens in
+  # the step's description. Password defaults to a throwaway when the step says
+  # "enter any password you like" (there's no `password` token to capture — which
+  # is itself the missing-auth vuln these missions teach).
+  #
+  # Selectors/frame confirmed live on vb-52: the login form is in frame [0,0,0].
+  - id: login-as
+    match:
+      title_regex: '(?i)^log in'
+    extract:
+      email:    { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
+      password: { from: description, regex: 'password `([^`]+)`', default: 'x' }
+    do:
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: '{email}' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: '{password}' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 2 }

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -270,6 +272,7 @@ def step(
     settle: Annotated[float, typer.Option(help="Seconds to wait before the after-snapshot (let SPA render)")] = 0.0,
     wait_after: Annotated[str, typer.Option(help="Or: wait until this selector is visible before snapshotting")] = "",
     wait_after_timeout: Annotated[float, typer.Option(help="Timeout for --wait-after (seconds)")] = 10.0,
+    enter: Annotated[bool, typer.Option(help="For type: press Enter after typing (submit the field)")] = False,
     save: Annotated[bool, typer.Option(help="Save the full capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Inject an action and capture before/after state.
@@ -295,6 +298,7 @@ def step(
             "settle": settle,
             "wait_after": wait_after or None,
             "wait_after_timeout": wait_after_timeout,
+            "enter": enter,
         },
     )
 
@@ -346,6 +350,8 @@ def type(  # noqa: A001 — the CLI verb really is "type"
     label: Annotated[str, typer.Option(help="Short label for this step")] = "",
     window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
     frame: Annotated[str, typer.Option(help="Type into a field inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
+    enter: Annotated[bool, typer.Option(help="Press Enter after typing (submit the field, e.g. an address bar)")] = False,  # noqa: E501
+    settle: Annotated[float, typer.Option(help="Seconds to wait before the after-snapshot (let SPA render)")] = 0.0,
     save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
 ) -> None:
     """Type text into a field (a friendlier `step type`).
@@ -354,6 +360,7 @@ def type(  # noqa: A001 — the CLI verb really is "type"
     Examples:
         trainee-sim type Firstname.Lastname@Fiserv.com --into "input#i0116"
         trainee-sim type --into "input[type=password]" --env TS_PW --secret
+        trainee-sim type "/auth/logout" --into "#browserBar" --frame 0/0 --enter
     """
     if env:
         value = os.environ.get(env, "")
@@ -375,6 +382,8 @@ def type(  # noqa: A001 — the CLI verb really is "type"
             "label": label or ("type-secret" if secret else None),
             "window": window or None,
             "frame": frame or None,
+            "enter": enter,
+            "settle": settle,
         },
     )
 
@@ -474,6 +483,7 @@ def _frame_to_str(frame: Any) -> str | None:
 def run(
     to: Annotated[str, typer.Option(help="Walk until we reach this state id (else run until no rule applies)")] = "",
     states: Annotated[str, typer.Option(help="YAML file of state signatures + rules")] = "courses/secure-code-warrior.yaml",  # noqa: E501
+    missions: Annotated[str, typer.Option(help="YAML file of reusable mission step-handlers")] = "courses/missions.yaml",  # noqa: E501
     window: Annotated[str, typer.Option(help="Observe/act on this window (index/'latest'/url substring)")] = "",
     once: Annotated[bool, typer.Option(help="Take a single step, then stop")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't prompt before each step (autonomous)")] = False,
@@ -503,9 +513,15 @@ def run(
     doc = yaml.safe_load(states_path.read_text()) or {}
     state_defs = doc.get("states", [])
     rule_defs = doc.get("rules", [])
+    api_hosts = doc.get("api_hosts")  # filters the network view in stuck-context
     if not rule_defs:
         typer.echo(f"No rules in {states_path} — add a `rules:` block.", err=True)
         raise typer.Exit(1)
+
+    # The shared, cross-mission step-handler library (optional — only used once the
+    # walker enters a mission).
+    missions_path = Path(missions)
+    mission_steps = (yaml.safe_load(missions_path.read_text()) or {}).get("steps", []) if missions_path.exists() else []
 
     def observe() -> dict[str, Any]:
         result = _call("/observe", json={"label": "run", "window": window or None})
@@ -525,16 +541,73 @@ def run(
                 "settle": ui.get("settle", 0.0),
                 "wait_after": ui.get("wait_after"),
                 "wait_after_timeout": ui.get("wait_after_timeout", 10.0),
+                "enter": ui.get("enter", False),
             },
         )
         if result.get("error"):
             raise typer.Exit(1)
 
-    def confirm(state_id: str, rule: dict[str, Any]) -> bool:
-        action = (rule.get("do", {}).get("ui", {}) or {}).get("action", "?")
-        return typer.confirm(f"[{state_id}] run rule '{rule['id']}' ({action})?", default=True)
+    def http_fetch(method: str, url: str, headers: dict[str, str], body: str | None) -> dict[str, Any]:
+        return _call("/fetch", json={"url": url, "method": method, "headers": headers or None, "body": body})
 
-    runner = Runner(state_defs, rule_defs, observe, act, confirm=confirm)
+    def eval_js(script: str) -> Any:
+        return _call("/eval", json={"script": script}).get("result")
+
+    def confirm(matched: list[str], rule: dict[str, Any]) -> bool:
+        return typer.confirm(f"[{', '.join(matched)}] run rule '{rule['id']}'?", default=True)
+
+    # Mission reader: `activeIndex` is read fresh from portal /challenges each call
+    # (it changes as steps complete); the step playbook (instruction[]) is static
+    # per mission, so it's fetched once from captured /api/missions traffic and
+    # cached. Auth mirrors the video-gate: X-Session-ID = localStorage.sessionId.
+    mission_playbook: dict[str, Any] = {}
+
+    def _playbook(url: str) -> list[dict[str, Any]]:
+        if "steps" not in mission_playbook:
+            events = _call("/network", method="GET").get("events") or []
+            md = _event_json(_find_event(events, "/api/missions/"))
+            if not md:  # not buffered — bounce through about:blank to re-fire it
+                _call("/step", json={"action": "navigate", "value": "about:blank"})
+                rec = _call("/step", json={"action": "navigate", "value": url, "settle": 6.0})
+                events = ((rec.get("record") or {}).get("after") or {}).get("network") or []
+                md = _event_json(_find_event(events, "/api/missions/"))
+            mission_playbook["steps"] = sorted((md or {}).get("instruction") or [], key=lambda s: s.get("order", 0))
+        return mission_playbook["steps"]
+
+    def read_mission() -> dict[str, Any] | None:
+        cur = (_call("/session/status", method="GET").get("current_url")) or ""
+        m = re.search(r"/mission/course/([^/]+)/([^/]+)/([^/]+)/([^/]+)", cur)
+        if not m:
+            return None
+        course, lang, mod, task = m.groups()
+        sid = _call("/eval", json={"script": "localStorage.sessionId"}).get("result")
+        ch = _call("/fetch", json={
+            "url": f"https://portal-api.securecodewarrior.com/courses/userCourse/{course}"
+                   f"/language/{lang}/module/{mod}/task/{task}/challenges",
+            "method": "GET", "headers": {"X-Session-ID": sid}})
+        body = ch.get("body") if isinstance(ch, dict) else None
+        active_index = body.get("activeIndex") if isinstance(body, dict) else None
+        return {"active_index": active_index, "steps": _playbook(cur)}
+
+    def verify_step(step_id: str, timeout: float = 20.0, interval: float = 2.0) -> bool:
+        """A step is done when the player posts /api/instructions/{id}/complete — the
+        live signal the pod drives (portal's activeIndex lags). /network is a
+        non-destructive peek, so we poll the buffer as the (async) event arrives."""
+        if not step_id:
+            return False
+        needle = f"/api/instructions/{step_id}/complete"
+        for _ in range(max(1, int(timeout / interval))):
+            for e in _call("/network", method="GET").get("events") or []:
+                ok = e.get("ok") or str(e.get("status") or "").startswith("2")
+                if e.get("type") == "http" and needle in str(e.get("url") or "") and ok:
+                    return True
+            time.sleep(interval)
+        return False
+
+    runner = Runner(
+        state_defs, rule_defs, observe, act, confirm=confirm, http=http_fetch, eval_js=eval_js,
+        api_hosts=api_hosts, read_mission=read_mission, mission_steps=mission_steps, verify_step=verify_step,
+    )
     result = runner.run(to=to or None, max_steps=1 if once else 20, auto=yes)
     typer.echo(json.dumps(result, indent=2, default=str))
     if result.get("status") in ("unknown", "ambiguous", "unexpected", "stuck"):
@@ -595,6 +668,88 @@ def eval_js(
         trainee-sim eval "return Object.entries(localStorage).map(([k,v])=>k+'='+v.slice(0,40))"
     """
     _request("/eval", json={"script": script})
+
+
+def _find_event(events: list[dict[str, Any]], needle: str) -> dict[str, Any] | None:
+    """First captured HTTP event whose url contains `needle` (newest last wins)."""
+    hit = None
+    for e in events:
+        if e.get("type") == "http" and needle in str(e.get("url") or ""):
+            hit = e
+    return hit
+
+
+def _event_json(event: dict[str, Any] | None) -> Any:
+    """Decode a captured event's response body (it may be a JSON string or dict)."""
+    if not event:
+        return None
+    body = event.get("response_body")
+    if isinstance(body, str):
+        try:
+            return json.loads(body)
+        except (ValueError, TypeError):
+            return None
+    return body
+
+
+@app.command()
+def mission(
+    reload: Annotated[bool, typer.Option(help="Reload the mission to capture fresh API traffic (re-inits the pod)")] = False,  # noqa: E501
+    window: Annotated[str, typer.Option(help="Observe/act on this window (index/'latest'/url substring)")] = "",
+) -> None:
+    """Expose the current mission's step playbook (titles + copy-paste values).
+
+    Missions are server-verified challenges (see docs/mission-api.md) — no cheap
+    API skip — but the experiential-mission API hands us the steps as data. This
+    reads the captured `/api/missions/*` (the steps) and portal `/challenges`
+    (the current `activeIndex`) and prints them. Telemetry must be ON.
+
+    By default it reads what's already buffered; pass --reload to navigate the
+    mission afresh (fires the API again, but re-initialises the pod). If nothing
+    is found, you're probably not on a mission, or telemetry was off on load.
+    """
+    if reload:
+        status = _call("/session/status", method="GET")
+        url = status.get("current_url") or ""
+        if "/mission/" not in url:
+            typer.echo("Not on a mission (url has no /mission/). Navigate to one first.", err=True)
+            raise typer.Exit(1)
+        # Re-navigating to the same hash URL is a no-op in the SPA, so bounce
+        # through about:blank to force a real reload (re-fires /api/missions).
+        _call("/step", json={"action": "navigate", "value": "about:blank"})
+        rec = _call("/step", json={"action": "navigate", "value": url, "settle": 6.0, "window": window or None})
+        after = (rec.get("record") or {}).get("after") or {}
+        events = after.get("network") or []
+    else:
+        events = _call("/network", method="GET").get("events") or []
+
+    mission_def = _event_json(_find_event(events, "/api/missions/"))
+    challenges = _event_json(_find_event(events, "/task/")) or {}
+    if not mission_def:
+        typer.echo(
+            "No /api/missions/* traffic captured. Ensure telemetry is on and you're on a "
+            "mission; try `trainee-sim mission --reload`.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    steps = sorted(mission_def.get("instruction") or [], key=lambda s: s.get("order", 0))
+    active = challenges.get("activeIndex")
+    flag = (steps[0].get("mission") or {}).get("flag") if steps else None
+    pod = ((mission_def.get("missionData") or {}).get("url") or "").split("?")[0]
+
+    typer.echo(json.dumps({
+        "mission": mission_def.get("id"),
+        "name": mission_def.get("name"),
+        "active_index": active,
+        "flag": flag,
+        "pod": pod,
+        "steps": [
+            {"order": s.get("order"), "current": s.get("order") == active,
+             "title": s.get("title"), "description": (s.get("description") or "").strip()}
+            for s in steps
+        ],
+    }, indent=2, default=str))
 
 
 @app.command()

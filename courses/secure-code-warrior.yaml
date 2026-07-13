@@ -5,6 +5,12 @@
 # Signals are intentionally minimal + stable (ids, hrefs, frame+text) rather
 # than position- or date-dependent. Add states as we discover them.
 
+# When the walker stops, its `context.network` view is filtered to these host
+# substrings so the training's own API stands out from RUM/analytics noise
+# (Coralogix et al). Purely a diagnostics filter — capture still records all.
+api_hosts:
+  - securecodewarrior.com
+
 states:
   # --- Microsoft (Entra) SSO, used by both Fiserv and the Clover/SCW hop ---
   - id: ms-login-username
@@ -65,6 +71,22 @@ states:
   - id: scw-course-task
     url_contains: /course-task/
 
+  # A video activity specifically — same URL, but the title is "Video | …". This
+  # overlaps scw-course-task (both match), so the runner considers rules for both
+  # and the more specific `video-advance` is ordered first. Videos gate Continue
+  # until watched; see the video-advance rule + docs/video-gate-hypothesis.md.
+  - id: scw-video-task
+    url_contains: /course-task/
+    title_contains: "Video"
+
+  # A mission — an interactive, server-verified challenge on its OWN URL shape
+  # (#/mission/course/…, NOT /course-task/). Resume can drop you here instead of a
+  # course-task. The mocked target app (e.g. Viking Bank) lives in frame [0,0,0];
+  # there's no cheap API skip — the pod verifies real actions. See docs/mission-api.md.
+  - id: scw-mission
+    url_contains: /mission/course/
+    title_contains: "Mission"
+
 # Rules describe how to move between states: in state `when`, do `do`, and expect
 # to land in `expect`. The rule runner (engine/runner.py) observes → matches the
 # `when` → acts → re-observes to verify. `expect` is optional: omit it while the
@@ -83,7 +105,52 @@ rules:
         by: xpath
         selector: '//button[contains(translate(normalize-space(.), "RESUME", "resume"), "resume")]'
         settle: 3          # SPA needs a moment to load the resumed activity
-    expect: scw-course-task   # discovered by running this rule: Resume → the current task
+    # Resume lands on whichever activity is current — a course-task OR a mission.
+    # `expect` accepts either, so the step verifies against reality rather than
+    # assuming one shape (observed live: Resume → a mission on this course).
+    expect: [scw-course-task, scw-mission]
+
+  # Advance past a VIDEO via the API instead of watching it. The gate is a POST to
+  # the task attempt's /answer endpoint; auth is the X-Session-ID header (value =
+  # localStorage.sessionId), NOT a bearer token. Full derivation in
+  # docs/video-gate-hypothesis.md. Steps: read the session id + the four id
+  # segments from the /course-task/ URL; GET /challenges to learn this task's
+  # taskAttemptId + type; POST {} to /answer (only if it really is a video);
+  # then re-enter (Back to course → Resume) so the SPA re-syncs and moves on — an
+  # out-of-band write doesn't refresh the Continue button in place.
+  - id: video-advance
+    when: scw-video-task
+    do:
+      - http:
+          context:
+            sid:    { eval: "localStorage.sessionId" }
+            course: { url_regex: "/course-task/([^/]+)/([^/]+)/([^/]+)/([^/]+)", group: 1 }
+            lang:   { url_regex: "/course-task/([^/]+)/([^/]+)/([^/]+)/([^/]+)", group: 2 }
+            mod:    { url_regex: "/course-task/([^/]+)/([^/]+)/([^/]+)/([^/]+)", group: 3 }
+            task:   { url_regex: "/course-task/([^/]+)/([^/]+)/([^/]+)/([^/]+)", group: 4 }
+          requests:
+            - method: GET
+              url: "https://portal-api.securecodewarrior.com/courses/userCourse/{course}/language/{lang}/module/{mod}/task/{task}/challenges"
+              headers: { X-Session-ID: "{sid}" }
+              capture: { attempt: taskAttemptId, ttype: taskType }
+            - method: POST
+              only_if: "{ttype}==video"
+              url: "https://portal-api.securecodewarrior.com/courses/challenges/language/{lang}/module/{mod}/taskAttempt/{attempt}/answer"
+              headers: { X-Session-ID: "{sid}" }
+              body: "{}"
+      - ui: { action: click, frame: [0], by: xpath, selector: "//a[contains(normalize-space(.),'Back to course')]", settle: 2 }
+      - ui: { action: click, frame: [0], by: xpath, selector: '//button[contains(translate(normalize-space(.),"RESUME","resume"),"resume")]', settle: 3 }
+    expect: scw-course-task
+
+  # Drive a mission via its step sub-loop (engine/mission.py + courses/missions.yaml).
+  # The runner reads the current step (instruction[activeIndex]), matches it against
+  # the shared step-handler library, drives it, and verifies the pod advanced —
+  # stopping on an un-encoded step with context. No `expect`: where a completed
+  # mission returns is still an open question (docs/mission-api.md), so we report
+  # `mission-complete` and re-locate rather than assuming a destination.
+  - id: do-mission
+    when: scw-mission
+    do: { mission: {} }
 
   # Advance to the next activity. NOTE: Continue is disabled until the task is
   # complete (for a video, until it's watched to the end — see
