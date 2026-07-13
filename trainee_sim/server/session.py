@@ -643,8 +643,22 @@ class BrowserSession:
         try:
             self._enter_frame_path(driver, frame)
             el = driver.find_element(locator, selector)
+            js_click = False
             if action == "click":
-                el.click()
+                from selenium.common.exceptions import (
+                    ElementClickInterceptedException,
+                    ElementNotInteractableException,
+                )
+
+                try:
+                    el.click()
+                except (ElementNotInteractableException, ElementClickInterceptedException):
+                    # The element is in the DOM but not natively clickable — e.g. a
+                    # side-overlay / hover-menu link (the app's Logout) that Selenium
+                    # can't hit-test. Dispatch a DOM-level click on it directly; the
+                    # app's own handlers respond to that just the same.
+                    driver.execute_script("arguments[0].click();", el)
+                    js_click = True
             else:  # type
                 el.clear()
                 el.send_keys(value or "")
@@ -652,7 +666,14 @@ class BrowserSession:
                     # Submit — the mocked apps' simulated address bar / forms have no
                     # click-target, so an explicit Enter is how they navigate.
                     el.send_keys(Keys.ENTER)
-            return {"action": action, "by": by, "selector": selector, "frame": frame, "enter": enter}
+            return {
+                "action": action,
+                "by": by,
+                "selector": selector,
+                "frame": frame,
+                "enter": enter,
+                "js_click": js_click,
+            }
         except Exception as exc:
             raise ActionFailed(self._describe_action_error(exc, action, by, selector, frame))
         finally:
