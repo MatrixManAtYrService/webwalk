@@ -653,6 +653,12 @@ class BrowserSession:
         # frame index, …) becomes a readable ActionFailed rather than a 500.
         frame = frame or []
         try:
+            # Set the clipboard from the TOP document, before descending into the
+            # (possibly cross-origin) target frame: `execCommand('copy')` is denied in
+            # a cross-origin iframe, but the OS clipboard is global, so a copy in the
+            # same-origin, focused top document reaches the editor's paste all the same.
+            if action == "paste" and not self._set_clipboard(driver, value or ""):
+                raise ActionFailed("paste: could not write the text to the clipboard (execCommand copy failed)")
             self._enter_frame_path(driver, frame)
             el = driver.find_element(locator, selector)
             js_click = False
@@ -677,8 +683,9 @@ class BrowserSession:
                 # a cross-origin code-server (Monaco) editor: synthetic (untrusted)
                 # keyboard/paste events are ignored, and typing code char-by-char
                 # fights Monaco's auto-indent / auto-closing brackets. A real clipboard
-                # paste, by contrast, is inserted verbatim. See _paste_sync.
-                self._paste_sync(driver, el, value or "")
+                # paste, by contrast, is inserted verbatim. The clipboard was already
+                # set from the top document above; here we only focus + fire the chords.
+                self._paste_sync(driver, el)
             else:  # type
                 el.clear()
                 el.send_keys(value or "")
@@ -700,43 +707,47 @@ class BrowserSession:
             driver.switch_to.default_content()
 
     @staticmethod
-    def _paste_sync(driver: WebDriver, el: Any, text: str) -> None:
-        """Put `text` on the OS clipboard, focus `el`, select-all, and paste.
+    def _set_clipboard(driver: WebDriver, text: str) -> bool:
+        """Put `text` on the OS clipboard via `execCommand('copy')` off a throwaway
+        <textarea>. Needs no extra dependency and no `navigator.clipboard` permission
+        (which a cross-origin iframe is usually denied) — only a focused document,
+        which a headed browser's top frame has. Returns whether the copy succeeded.
+        Must be called from the top document: execCommand copy is blocked cross-origin.
+        """
+        return bool(
+            driver.execute_script(
+                """
+                const t = document.createElement('textarea');
+                t.style.position = 'fixed'; t.style.top = '0'; t.style.opacity = '0';
+                t.value = arguments[0];
+                document.body.appendChild(t);
+                t.focus(); t.select();
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                t.remove();
+                return ok;
+                """,
+                text,
+            )
+        )
+
+    @staticmethod
+    def _paste_sync(driver: WebDriver, el: Any) -> None:
+        """Focus `el`, select-all, and paste the (already-set) clipboard over it.
 
         The modifier key is chosen by the *browser host's* platform, because that's
         what the in-browser editor's keybindings follow: VS Code web binds select-all
         to Cmd+A on macOS (Ctrl+A there is "cursor to line start"), Ctrl+A elsewhere.
         We drive the chords with ActionChains (key_down/up) so they're trusted OS-level
-        input — the whole point, since Monaco ignores untrusted synthetic events.
-
-        The clipboard is set with `document.execCommand('copy')` off a throwaway
-        <textarea>: it needs no extra dependency and no `navigator.clipboard`
-        permission (which a cross-origin iframe is usually denied), only a focused
-        document — which a headed browser has. `el` is typically the `.monaco-editor`
-        / `.view-lines` container; clicking it moves focus into the editor so the
-        paste lands there.
+        input — the whole point, since Monaco ignores untrusted synthetic events. `el`
+        is typically the `.monaco-editor` / `.view-lines` container; clicking it moves
+        focus into the editor so the paste lands there.
         """
         import sys
 
         from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.keys import Keys
 
-        copied = driver.execute_script(
-            """
-            const t = document.createElement('textarea');
-            t.style.position = 'fixed'; t.style.top = '0'; t.style.opacity = '0';
-            t.value = arguments[0];
-            document.body.appendChild(t);
-            t.focus(); t.select();
-            let ok = false;
-            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-            t.remove();
-            return ok;
-            """,
-            text,
-        )
-        if not copied:
-            raise ActionFailed("paste: could not write the text to the clipboard (execCommand copy failed)")
         el.click()  # move focus into the editor (the clipboard write stole it)
         mod = Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL
         ac = ActionChains(driver)
