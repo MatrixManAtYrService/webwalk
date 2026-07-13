@@ -436,29 +436,57 @@ class BrowserSession:
         from selenium.webdriver.common.by import By
 
         if frame_path:
+            entry: dict[str, Any] = {"frame": list(frame_path)}
             try:
-                frames.append({"frame": list(frame_path), "url": driver.current_url})
+                entry["url"] = driver.current_url
             except Exception:
-                frames.append({"frame": list(frame_path), "url": None})
+                entry["url"] = None
+            # Dump this frame's visible text so content rendered inside (nested)
+            # iframes — e.g. the mission InstructionsPanel checklist — is
+            # observable. The `dom` field is the top document's page_source only,
+            # so without this a frame's step labels never reach the capture.
+            try:
+                body = driver.find_element(By.TAG_NAME, "body")
+                entry["text"] = (body.text or "").strip()[:4000]
+            except Exception:
+                entry["text"] = None
+            frames.append(entry)
 
         for tag in ("button", "a", "input", "select", "textarea"):
             for el in driver.find_elements(By.TAG_NAME, tag):
                 try:
-                    if not el.is_displayed():
+                    el_type = el.get_attribute("type")
+                    # Checkbox/radio inputs are often visually hidden (MUI et al.
+                    # render an icon while the real checked state lives on the
+                    # input). Skipping undisplayed elements would drop step-
+                    # completion state, so keep toggles and record `checked`
+                    # (via is_selected) plus the text of their enclosing row.
+                    is_toggle = tag == "input" and el_type in ("checkbox", "radio")
+                    if not is_toggle and not el.is_displayed():
                         continue
-                    elements.append(
-                        {
-                            "tag": tag,
-                            "text": (el.text or "").strip()[:120],
-                            "enabled": el.is_enabled(),
-                            "type": el.get_attribute("type"),
-                            "id": el.get_attribute("id"),
-                            "name": el.get_attribute("name"),
-                            "aria_label": el.get_attribute("aria-label"),
-                            "href": el.get_attribute("href") if tag == "a" else None,
-                            "frame": list(frame_path),  # [] = top document
-                        }
-                    )
+                    item: dict[str, Any] = {
+                        "tag": tag,
+                        "text": (el.text or "").strip()[:120],
+                        "enabled": el.is_enabled(),
+                        "type": el_type,
+                        "id": el.get_attribute("id"),
+                        "name": el.get_attribute("name"),
+                        "aria_label": el.get_attribute("aria-label"),
+                        "href": el.get_attribute("href") if tag == "a" else None,
+                        "frame": list(frame_path),  # [] = top document
+                    }
+                    if is_toggle:
+                        item["checked"] = el.is_selected()
+                        try:
+                            label = driver.execute_script(
+                                "return (arguments[0].closest("
+                                "'[role=heading],label,li,tr,div') || {}).innerText || null;",
+                                el,
+                            )
+                            item["label"] = label.strip()[:120] if isinstance(label, str) else None
+                        except Exception:
+                            item["label"] = None
+                    elements.append(item)
                 except Exception:
                     continue  # element went stale mid-scan; keep going
 
@@ -491,8 +519,8 @@ class BrowserSession:
             "url": driver.current_url,
             "title": driver.title,
             "elements": elements,
-            "frames": frames,  # the nested-frame map (empty if the page has none)
-            "dom": driver.page_source,  # top document only (frames listed above)
+            "frames": frames,  # nested-frame map + each frame's visible text
+            "dom": driver.page_source,  # top document only (frame text is in `frames`)
             "network": self.network.drain(),  # API traffic this step produced
             # Record the whole window set with each step, so a capture shows what
             # other tabs were open (and which one this snapshot is of).
