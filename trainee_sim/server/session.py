@@ -716,12 +716,32 @@ class BrowserSession:
 
     @staticmethod
     def _set_clipboard(driver: WebDriver, text: str) -> bool:
-        """Put `text` on the OS clipboard via `execCommand('copy')` off a throwaway
-        <textarea>. Needs no extra dependency and no `navigator.clipboard` permission
-        (which a cross-origin iframe is usually denied) — only a focused document,
-        which a headed browser's top frame has. Returns whether the copy succeeded.
-        Must be called from the top document: execCommand copy is blocked cross-origin.
+        """Put `text` on the OS clipboard. Returns whether it succeeded.
+
+        Prefers the OS clipboard tool (`pbcopy` on macOS, `xclip`/`xsel` on Linux):
+        it's independent of browser focus, whereas `execCommand('copy')` requires the
+        document to be focused — which a headed-but-backgrounded browser is not, so it
+        fails there. The browser copy is kept only as a last-ditch fallback. The paste
+        chord (Cmd/Ctrl+V) itself is delivered via ChromeDriver input and does NOT need
+        OS focus, so an OS-set clipboard + a driver-sent paste works fully headless.
         """
+        import shutil
+        import subprocess
+        import sys
+
+        tools = (
+            [["pbcopy"]]
+            if sys.platform == "darwin"
+            else [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+        )
+        for tool in tools:
+            if shutil.which(tool[0]):
+                try:
+                    subprocess.run(tool, input=text.encode("utf-8"), check=True, timeout=5)
+                    return True
+                except (subprocess.SubprocessError, OSError):
+                    continue
+        # Fallback: browser-side copy (works only if the window happens to be focused).
         return bool(
             driver.execute_script(
                 """
