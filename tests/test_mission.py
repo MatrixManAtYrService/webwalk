@@ -54,25 +54,44 @@ def test_login_as_fires_for_alice_and_extracts_real_credentials() -> None:
     assert _typed(result, "#Password") == "P@ssw0rd1!"
 
 
-def test_same_handler_fires_for_bob_with_a_different_value() -> None:
-    # The "one thing they changed": a different email, no explicit password token.
+def test_bob_step_uses_logout_then_login_because_its_copy_says_log_out() -> None:
+    # Bob's step reads "Log out again. This time, you log in as Bob …" — one
+    # checkbox that bundles a logout, so the more specific `logout-then-login`
+    # (title "log in" AND description mentions "log out") wins over plain login-as,
+    # and its `do` logs out via the nav menu before typing the new credentials.
     result = match_step(STEPS, S3_BOB)
-    assert result is not None and result["id"] == "login-as"
+    assert result is not None and result["id"] == "logout-then-login"
     assert result["ctx"]["email"] == "bob@bob.com"
-    assert result["ctx"]["password"] == "x"  # "any password you like" → the default
+    assert result["ctx"]["password"] == "password"  # "any password you like" → the default
+    assert _typed(result, "#Username") == "bob@bob.com"
+    # The logout click comes before the login typing.
+    selectors = [a["ui"].get("selector") for a in result["do"]]
+    assert "#menu-link-logout" in selectors
+    assert selectors.index("#menu-link-logout") < selectors.index("#Username")
 
 
 def test_login_handler_also_covers_the_incorrect_password_variant() -> None:
+    # "Log in again as Alice … enter any password you like" — no logout in the copy,
+    # so it stays plain login-as with the throwaway default password.
     result = match_step(STEPS, S2_BADPW)
     assert result is not None and result["id"] == "login-as"
-    assert result["ctx"] == {"email": "alice@alice.com", "password": "x"}
+    assert result["ctx"] == {"email": "alice@alice.com", "password": "password"}
 
 
-def test_logout_and_transfer_are_unencoded_so_far() -> None:
-    # No handler yet → None, which is what makes the runner stop with context for
-    # the agent to perform it once and then add the handler here.
-    assert match_step(STEPS, S1_LOGOUT) is None
-    assert match_step(STEPS, S4_TRANSFER) is None
+def test_logout_step_fires_the_log_out_handler() -> None:
+    result = match_step(STEPS, S1_LOGOUT)
+    assert result is not None and result["id"] == "log-out"
+    assert [a["ui"].get("selector") for a in result["do"]][-1] == "#menu-link-logout"
+
+
+def test_transfer_step_extracts_the_destination_account() -> None:
+    # The one changed value is Alice's account number from the copy; amount +
+    # description are fixed throwaways ("for any amount").
+    result = match_step(STEPS, S4_TRANSFER)
+    assert result is not None and result["id"] == "transfer-money"
+    assert result["ctx"]["dest"] == "94923054"
+    assert _typed(result, "#DestinationAccountNumber") == "94923054"
+    assert _typed(result, "#Description")  # required by the app, must be non-empty
 
 
 def test_step_frame_is_carried_through_rendering() -> None:

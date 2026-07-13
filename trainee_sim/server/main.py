@@ -219,15 +219,26 @@ async def fetch(body: FetchBody) -> dict[str, Any]:
 class EvalBody(BaseModel):
     script: str
     args: list[Any] | None = None
+    frame: str | None = None  # run inside a nested iframe, e.g. "0" or "0/1"
 
 
 @app.post("/eval")
 async def eval_endpoint(body: EvalBody) -> dict[str, Any]:
     """Run JS in the page and return its JSON-able result (introspection)."""
     try:
-        return await SESSION.eval_js(script=body.script, args=body.args)
+        return await SESSION.eval_js(script=body.script, args=body.args, frame=body.frame)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+@app.get("/challenge")
+async def challenge() -> dict[str, Any]:
+    """The current SCW challenge as a decision: stage, options, source context.
+
+    Reads the code editor + its controls into `{stage, options, submit, …}` (see
+    engine/challenge.py). `stage: "none"` when no code editor is on the page.
+    """
+    return await SESSION.challenge()
 
 
 @app.get("/network")

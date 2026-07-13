@@ -240,8 +240,8 @@ class _MissionFake:
     def act(self, ui: dict[str, Any]) -> None:
         self.acted.append(ui)
 
-    def verify(self, step_id: str) -> bool:
-        self.verified.append(step_id)
+    def verify(self, order: int) -> bool:
+        self.verified.append(order)
         return self._completes
 
 
@@ -251,14 +251,15 @@ def _mission_runner(mf: _MissionFake, lib: list[dict[str, Any]]) -> Runner:
 
 
 def test_mission_drives_encoded_step_verifies_complete_then_finishes() -> None:
-    # activeIndex 0 (login step) → drive login-as → its /complete fires → advance
+    # active_index 0 (login step) → drive login-as → its checkbox ticks → advance
     # past the end (len 1) → complete. Credentials are templated into the action,
-    # and verification is keyed on the step's id (not portal activeIndex).
+    # and verification is keyed on the step's order (its checkbox), not portal's
+    # activeIndex. Nothing non-mission applies afterward, so it's a clean checkpoint.
     mf = _MissionFake(0, [LOGIN_STEP])
     result = _mission_runner(mf, LOGIN_LIB).run(auto=True)
     assert result["status"] == "mission-complete"
     assert mf.acted == [{"action": "type", "frame": [0, 0, 0], "selector": "#Username", "value": "alice@alice.com"}]
-    assert mf.verified == ["s0"]
+    assert mf.verified == [0]
     assert result["mission"]["steps_done"] == [
         {"index": 0, "handler": "login-as", "step_id": "s0", "completed": True}]
 
@@ -280,7 +281,48 @@ def test_mission_blocked_when_complete_event_never_fires() -> None:
     result = _mission_runner(mf, LOGIN_LIB).run(auto=True)
     assert result["status"] == "stuck"
     assert result["mission"]["status"] == "mission-blocked"
-    assert len(mf.acted) == 1 and mf.verified == ["s0"]  # it tried once and checked
+    assert len(mf.acted) == 1 and mf.verified == [0]  # it tried once and checked
+
+
+def test_completed_mission_continues_the_walk_when_a_page_rule_applies() -> None:
+    # A finished mission must not dead-end: once it completes, the results panel
+    # shows a "Continue" (a new page state with a non-mission rule), and the walk
+    # carries on through it to the next state instead of stopping at mission-complete.
+    states = [
+        {"id": "mission", "url_contains": "/mission/"},
+        # Same URL as `mission`, but only matches once the results Continue appears.
+        {"id": "mission-done", "url_contains": "/mission/", "elements": [{"id": "continue"}]},
+        {"id": "next", "url_contains": "/next/", "terminal": True},
+    ]
+    rules = [
+        # Listed first so it wins when a completed mission matches both states.
+        {"id": "advance", "when": "mission-done",
+         "do": {"ui": {"action": "click", "selector": "#continue"}}, "expect": "next"},
+        {"id": "do-mission", "when": "mission", "do": {"mission": {}}},
+    ]
+    # Observe script: in-progress (no Continue) → [complete] → results w/ Continue
+    # ×2 → the next task ×2. (The post-complete locate + the loop re-observe both
+    # see the Continue; then `advance` clicks and we land on `next`.)
+    without = {"url": "/mission/x", "title": "", "elements": []}
+    withcont = {"url": "/mission/x", "title": "", "elements": [{"id": "continue"}]}
+    nxt = {"url": "/next/y", "title": "", "elements": []}
+    payloads = [without, withcont, withcont, nxt, nxt]
+    i = {"n": 0}
+
+    def observe() -> dict[str, Any]:
+        pl = payloads[min(i["n"], len(payloads) - 1)]
+        i["n"] += 1
+        return pl
+
+    acted: list[dict[str, Any]] = []
+    mf = _MissionFake(0, [LOGIN_STEP])
+    runner = Runner(states, rules, observe, lambda ui: acted.append(ui),
+                    read_mission=mf.read, mission_steps=LOGIN_LIB, verify_step=mf.verify)
+    result = runner.run(auto=True)
+
+    assert result["status"] == "done"       # walked past the mission and reached the terminal
+    assert result["state"] == ["next"]
+    assert {"action": "click", "selector": "#continue"} in acted  # the Continue was clicked
 
 
 def test_unknown_state_stops_the_walk() -> None:

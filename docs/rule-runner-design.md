@@ -45,8 +45,10 @@ replaying arbitrary recorded traffic. Start with a human confirming each step.
 
 ## What we already have (the foundation)
 
-- **Primitives**: observe (state + frames + windows + `network`), act
-  (click/type/navigate), wait/settle, readable errors — all in `session.py`.
+- **Primitives**: observe (state + frames-with-text + windows + `network` +
+  hidden checkbox/radio `checked` state), act (click/type/navigate, with a
+  DOM-level click fallback for non-interactable overlay/menu controls),
+  wait/settle, readable errors — all in `session.py`.
 - **State recognition**: `courses/*.yaml` signatures + `match_states()` — this is
   the `when` half of a rule already built and tested. `where` prints the current
   match(es); "exactly one" is the healthy case.
@@ -60,8 +62,10 @@ replaying arbitrary recorded traffic. Start with a human confirming each step.
   re-matches state. This is what makes resume free.
 - **Steps must be safe to re-enter.** After acting, re-observe; if the state
   already advanced (someone did it by hand, or we're resuming), don't redo it.
-  Detecting "already done" likely means richer state signatures (progress %,
-  a "completed" marker) — see open questions.
+  For **missions**, the per-step checklist boxes are now directly observable —
+  each is a captured element with `checked` + its `label` (frame `[0,0]`), so
+  "already done" is a boolean read, no `/challenges` round-trip needed. Other
+  task types may still need richer signatures (progress %) — see open questions.
 - **Prefer the API when a captured, safe shape exists; UI is the fallback.**
   Each UI step we can swap for a request is a robustness win. The runner should
   make this a *ratchet*, not a rewrite (see below).
@@ -159,7 +163,10 @@ SCW's state is mediated by a **Phoenix websocket** (we saw `TrackEvent` /
   settle, or watch specific ws frames? (See the captured Phoenix protocol.)
 - **"Already done" detection (resume/idempotency).** How does a state signature
   encode progress so the runner skips completed steps? (Progress %, completion
-  markers — the breakdown JSON has `completedTasks/totalTasks`.)
+  markers — the breakdown JSON has `completedTasks/totalTasks`.) *Solved for
+  missions:* the observed checklist checkboxes carry per-step `checked` + `label`
+  (see mission-api.md), so the mission runner reads step progress straight from
+  the snapshot. Still open for course-level (task-to-task) progress.
 - **Planning depth.** Greedy-progress vs. real shortest-path over the graph —
   when does greedy get stuck?
 - **Autonomy safety.** Bounding an agent iterating on a live corporate LMS: rate

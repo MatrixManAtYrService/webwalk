@@ -62,9 +62,12 @@ ConfirmFn = Callable[[list[str], dict[str, Any]], bool]  # (matched states, rule
 HttpFn = Callable[[str, str, dict[str, str], str | None], dict[str, Any]]  # (method,url,headers,body)->resp
 EvalFn = Callable[[str], Any]                     # (js) -> evaluated value
 # () -> {active_index, steps:[instruction…]} for the mission we're on, or None.
+# `active_index` is the current step: derived from the observable step-checkboxes
+# (the first unticked one), not portal's stale `activeIndex` — see the CLI wiring.
 ReadMissionFn = Callable[[], dict[str, Any] | None]
-# (step id) -> did the pod post /api/instructions/{id}/complete within a timeout?
-VerifyStepFn = Callable[[str], bool]
+# (step order) -> did the pod tick that step's checkbox within a timeout? The
+# checkbox `checked` state is the synchronous, in-snapshot completion signal.
+VerifyStepFn = Callable[[int], bool]
 
 
 def _step_brief(step: dict[str, Any]) -> dict[str, Any]:
@@ -243,14 +246,15 @@ class Runner:
     def _drive_mission(self, auto: bool, max_steps: int = 15) -> dict[str, Any]:
         """Walk a mission's steps: read the playbook + entry point once, then for
         each step match it against the shared step-handler library, drive the
-        handler, and verify the pod fired that step's `/complete` event. Stops on
+        handler, and verify the pod ticked that step's checkbox. Stops on
         completion, on an un-encoded step (`mission-stuck`), or on a step that
         didn't take (`mission-blocked`).
 
-        Verification watches for `POST /api/instructions/{step.id}/complete` — the
-        live per-step signal — NOT portal's `activeIndex`, which is a stale mirror
-        that doesn't move as steps complete (see docs/mission-api.md). We advance
-        the step index locally once a step is confirmed, rather than re-reading it.
+        Both the entry point (`active_index`) and per-step verification come from
+        the step-checkboxes captured in the observe snapshot — the synchronous,
+        always-present completion signal — NOT portal's `activeIndex`, which is a
+        stale mirror that doesn't move as steps complete (see docs/mission-api.md).
+        We advance the step index locally once a step is confirmed.
 
         Handlers match on the step's own signature, so the same `login-as` fires in
         any mission — the recurring-prefix reuse that motivates this design.
@@ -279,7 +283,7 @@ class Runner:
                 return {"status": "aborted", "active_index": idx, "steps_done": steps_done}
 
             self._do_action(handler["do"], {})
-            completed = bool(self._verify_step and self._verify_step(step.get("id")))
+            completed = bool(self._verify_step and self._verify_step(step.get("order")))
             steps_done.append({"index": idx, "handler": handler["id"],
                                "step_id": step.get("id"), "completed": completed})
             if not completed:
@@ -427,6 +431,16 @@ class Runner:
                 history.append({"rule": rule["id"], "from": matched, "mission": mres})
                 if mres.get("status") == "complete":
                     getattr(self, rule["id"])()  # advance the flow model past the mission
+                    # A finished mission shouldn't dead-end the walk: if the page now
+                    # offers a way onward (a results "Continue" → some page rule), keep
+                    # going. Only when nothing non-mission applies is this a genuine
+                    # checkpoint we report as `mission-complete`.
+                    _, after_matched = self.locate()
+                    onward = [r for r in self.applicable_rules(after_matched) if not _is_mission_action(r["do"])]
+                    if to and to in after_matched:
+                        return {"status": "reached", "state": to, "url": url, "history": history}
+                    if onward:
+                        continue
                     return {"status": "mission-complete", "rule": rule["id"], "mission": mres,
                             "url": url, "history": history}
                 result = {"status": "stuck", "rule": rule["id"], "mission": mres,

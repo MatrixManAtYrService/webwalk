@@ -556,10 +556,12 @@ def run(
     def confirm(matched: list[str], rule: dict[str, Any]) -> bool:
         return typer.confirm(f"[{', '.join(matched)}] run rule '{rule['id']}'?", default=True)
 
-    # Mission reader: `activeIndex` is read fresh from portal /challenges each call
-    # (it changes as steps complete); the step playbook (instruction[]) is static
-    # per mission, so it's fetched once from captured /api/missions traffic and
-    # cached. Auth mirrors the video-gate: X-Session-ID = localStorage.sessionId.
+    # Mission reader: the entry point (which step we're on) comes from the observable
+    # step-checkboxes, NOT portal's `activeIndex` — portal's is a stale mirror that
+    # stays 0 even mid-mission, so it can't resume a partially-done mission (see
+    # docs/mission-api.md). The step playbook (instruction[]) is static per mission,
+    # so it's fetched once from captured /api/missions traffic and cached. Auth
+    # mirrors the video-gate: X-Session-ID = localStorage.sessionId.
     mission_playbook: dict[str, Any] = {}
 
     def _playbook(url: str) -> list[dict[str, Any]]:
@@ -576,6 +578,35 @@ def run(
 
     def read_mission() -> dict[str, Any] | None:
         cur = (_call("/session/status", method="GET").get("current_url")) or ""
+        if "/mission/course/" not in cur:
+            return None
+        steps = _playbook(cur)
+        # Entry point from the observable checkboxes: the first unticked step (or the
+        # end, if all are ticked). Falls back to portal `activeIndex` only if the
+        # checkboxes aren't in the snapshot (pod not yet rendered).
+        payload = observe()
+        active_index = _active_index_from_checkboxes(payload.get("elements") or [])
+        if active_index is None:
+            active_index = _portal_active_index(cur) or 0
+        return {"active_index": active_index, "steps": steps}
+
+    def verify_step(order: int | None, timeout: float = 20.0, interval: float = 2.0) -> bool:
+        """A step is done when its checklist checkbox ticks — the synchronous signal
+        the observe snapshot carries (`instr-check-{order}` with `checked`). The pod
+        flips it a beat after the real action, so poll a few observes for it."""
+        if order is None:
+            return False
+        for _ in range(max(1, int(timeout / interval))):
+            payload = observe()
+            checked = _checkbox_checked(payload.get("elements") or [], order)
+            if checked:
+                return True
+            time.sleep(interval)
+        return False
+
+    def _portal_active_index(cur: str) -> int | None:
+        """Fallback entry hint from portal /challenges (stale — mid-mission it stays
+        0; only trusted when the checkboxes aren't captured)."""
         m = re.search(r"/mission/course/([^/]+)/([^/]+)/([^/]+)/([^/]+)", cur)
         if not m:
             return None
@@ -586,23 +617,7 @@ def run(
                    f"/language/{lang}/module/{mod}/task/{task}/challenges",
             "method": "GET", "headers": {"X-Session-ID": sid}})
         body = ch.get("body") if isinstance(ch, dict) else None
-        active_index = body.get("activeIndex") if isinstance(body, dict) else None
-        return {"active_index": active_index, "steps": _playbook(cur)}
-
-    def verify_step(step_id: str, timeout: float = 20.0, interval: float = 2.0) -> bool:
-        """A step is done when the player posts /api/instructions/{id}/complete — the
-        live signal the pod drives (portal's activeIndex lags). /network is a
-        non-destructive peek, so we poll the buffer as the (async) event arrives."""
-        if not step_id:
-            return False
-        needle = f"/api/instructions/{step_id}/complete"
-        for _ in range(max(1, int(timeout / interval))):
-            for e in _call("/network", method="GET").get("events") or []:
-                ok = e.get("ok") or str(e.get("status") or "").startswith("2")
-                if e.get("type") == "http" and needle in str(e.get("url") or "") and ok:
-                    return True
-            time.sleep(interval)
-        return False
+        return body.get("activeIndex") if isinstance(body, dict) else None
 
     runner = Runner(
         state_defs, rule_defs, observe, act, confirm=confirm, http=http_fetch, eval_js=eval_js,
@@ -655,19 +670,93 @@ def fetch(
 @app.command(name="eval")
 def eval_js(
     script: Annotated[str, typer.Argument(help="JS to run in the page (a bare expression is auto-returned)")],
+    frame: Annotated[str, typer.Option(help="Run inside a (nested) iframe, e.g. '0' or '0/1'")] = "",
 ) -> None:
     """Run JS in the logged-in page and print its result (introspection).
 
     The escape hatch for what `observe` doesn't show — web storage, app state, or
-    how the SPA authenticates. Runs in the top document. A bare expression is
-    wrapped in `return (…)`; use explicit `return` for multi-statement scripts.
+    how the SPA authenticates. Runs in the top document unless `--frame` targets a
+    nested iframe. A bare expression is wrapped in `return (…)`; use explicit
+    `return` for multi-statement scripts.
 
     \b
     Examples:
         trainee-sim eval "Object.keys(localStorage)"
         trainee-sim eval "return Object.entries(localStorage).map(([k,v])=>k+'='+v.slice(0,40))"
+        trainee-sim eval --frame 0 "document.querySelector('table#editor').rows.length"
     """
-    _request("/eval", json={"script": script})
+    _request("/eval", json={"script": script, "frame": frame or None})
+
+
+@app.command()
+def challenge(
+    source: Annotated[bool, typer.Option(help="Print the full line-numbered source, not the decision view")] = False,
+) -> None:
+    """Read the current SCW challenge as a decision: stage, options, source.
+
+    A challenge is a choice among fixed options. This prints the stage
+    (`locate` = identify the vulnerable block, `fix` = pick a solution), the
+    enumerated options each with a ready-to-fire `act`, and the code as context —
+    so a human or the engine picks instead of scrolling. `--source` dumps the raw
+    line-numbered file(s) instead. `stage: "none"` means no code editor is up.
+    """
+    result = _call("/challenge")
+    if source:
+        result = _challenge_source(result)
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+def _challenge_source(view: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a challenge view to just its line-numbered code pane(s)."""
+    def _fmt(lines: list[dict[str, Any]]) -> list[str]:
+        return [f"{ln['n']:>4} | {ln['code']}" for ln in (lines or [])]
+
+    if view.get("stage") == "locate":
+        return {"stage": "locate", "file": view.get("file"), "source": _fmt(view.get("source"))}
+    if view.get("stage") == "fix":
+        left, right = view.get("left") or {}, view.get("right") or {}
+        return {
+            "stage": "fix", "file": view.get("file"),
+            "left": {"shows": left.get("shows"), "source": _fmt(left.get("code"))},
+            "right": {"shows": right.get("shows"), "source": _fmt(right.get("code"))},
+        }
+    return view
+
+
+_INSTR_CHECK = re.compile(r"instr-check-(\d+)")
+
+
+def _step_checks(elements: list[dict[str, Any]]) -> dict[int, bool]:
+    """Map step order -> checked, from the captured `instr-check-{n}` checkboxes.
+
+    The mission checklist's per-step boxes are surfaced in the observe snapshot
+    (see the checkbox-state memory): their id is `instr-check-{order}[:checked]`
+    and they carry a `checked` bool. This is the synchronous completion signal the
+    mission loop reads for both "which step are we on" and "did this step take".
+    """
+    checks: dict[int, bool] = {}
+    for el in elements:
+        m = _INSTR_CHECK.match(str(el.get("id") or ""))
+        if m:
+            checks[int(m.group(1))] = bool(el.get("checked"))
+    return checks
+
+
+def _active_index_from_checkboxes(elements: list[dict[str, Any]]) -> int | None:
+    """The current step = the first unticked checkbox (all ticked → past the end).
+    None when no checkboxes are captured, so the caller can fall back."""
+    checks = _step_checks(elements)
+    if not checks:
+        return None
+    for i in range(max(checks) + 1):
+        if not checks.get(i, False):
+            return i
+    return max(checks) + 1
+
+
+def _checkbox_checked(elements: list[dict[str, Any]], order: int) -> bool:
+    """Whether the step at `order` has its checklist box ticked."""
+    return _step_checks(elements).get(order, False)
 
 
 def _find_event(events: list[dict[str, Any]], needle: str) -> dict[str, Any] | None:

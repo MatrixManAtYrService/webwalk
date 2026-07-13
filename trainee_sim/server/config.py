@@ -75,6 +75,13 @@ class Settings:
     # Per-body size cap (bytes) — bodies larger than this are truncated.
     network_max_body_bytes: int = field(default_factory=lambda: int(os.environ.get("TS_NETWORK_MAX_BODY", "65536")))
 
+    # Per-frame visible-text cap in an observe snapshot. A code editor renders
+    # the whole file into one frame, so the old 4000 truncated mid-file (the
+    # challenge-observability bug); 20000 fits a typical challenge source. The
+    # structured `challenge`/editor extraction is the real source — this is the
+    # raw-text fallback. See docs/code-observability-design.md.
+    frame_text_max: int = field(default_factory=lambda: int(os.environ.get("TS_FRAME_TEXT_MAX", "20000")))
+
     # --- in-page fetch (fetch_in_page / http rule actions) ---
     #
     # Requests fired from inside the logged-in page (so they carry its session)

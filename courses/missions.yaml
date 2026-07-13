@@ -25,14 +25,76 @@ steps:
   # "enter any password you like" (there's no `password` token to capture — which
   # is itself the missing-auth vuln these missions teach).
   #
+  # NOTE ON ORDER: match_step returns the FIRST matching handler, so the more
+  # specific `logout-then-login` (title "log in" AND copy mentions "log out") must
+  # precede plain `login-as` — else login-as would greedily claim Bob's step.
+
+  # Log OUT then log in — a single checklist step whose copy says "Log out again.
+  # This time, you log in as …" (vb-52 step 4, "Log in as Bob"). It's one checkbox,
+  # so the handler must do both: the prior step left a *different* user logged in,
+  # so we can't just type into a login form that isn't showing. It additionally
+  # requires "log out" in the description, so a plain "Log in as Alice" (no logout)
+  # still falls through to `login-as` below.
+  #
+  # Logout is the app's nav menu -> Logout (`#menu-link-logout`, href /auth/logout).
+  # The `menu` toggle + the logout link were captured live on vb-52; the click
+  # sequence itself is authored-from-observation (validate on the next fresh run).
+  - id: logout-then-login
+    match:
+      title_regex: '(?i)^log in'
+      desc_contains: 'log out'
+    extract:
+      email:    { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
+      password: { from: description, regex: 'password `([^`]+)`', default: 'password' }
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//a[normalize-space(.)='menu']", settle: 1 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-logout', settle: 2 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: '{email}' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: '{password}' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 2 }
+
+  # Plain log in (no preceding logout — the app is already at the login form).
   # Selectors/frame confirmed live on vb-52: the login form is in frame [0,0,0].
+  #
+  # The default password is `password`, not a one-char throwaway: the mocked app
+  # rejected `x` when logging in as Bob ("bob's auth is broken") even though the
+  # vuln is that ANY password is accepted — there's a minimum-length check that
+  # fires *before* the broken auth, so the throwaway must be long enough. When the
+  # step names a real password (Alice's `P@ssw0rd1!`) that wins via the regex.
   - id: login-as
     match:
       title_regex: '(?i)^log in'
     extract:
       email:    { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
-      password: { from: description, regex: 'password `([^`]+)`', default: 'x' }
+      password: { from: description, regex: 'password `([^`]+)`', default: 'password' }
     do:
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: '{email}' }
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: '{password}' }
       - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 2 }
+
+  # Log out — a standalone checklist step ("Log out, and have a look at the code
+  # …", vb-52 step 2). Same nav-menu -> Logout as above. Matches only titles that
+  # START with "log out" so it never claims a "Log in …" step.
+  - id: log-out
+    match:
+      title_regex: '(?i)^log out'
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//a[normalize-space(.)='menu']", settle: 1 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-logout', settle: 2 }
+
+  # Transfer money (vb-52 step 5, "Transfer money from Bob to Alice"). Selectors,
+  # frame [0,0,0], and the required-Description quirk were all confirmed LIVE: the
+  # form silently re-renders "Please enter a description" and does NOT tick the
+  # step unless Description is filled. The destination account is the backtick-
+  # quoted number in the copy ("Alice's account (`94923054`)"); the amount and
+  # description are arbitrary ("for any amount"), so they're fixed throwaways.
+  - id: transfer-money
+    match:
+      title_regex: '(?i)^transfer'
+    extract:
+      dest: { from: description, regex: '`(\d+)`' }
+    do:
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#DestinationAccountNumber', value: '{dest}' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Amount', value: '100' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Description', value: 'repayment' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#transfer-btn-submit', settle: 3 }

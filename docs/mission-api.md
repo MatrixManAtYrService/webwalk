@@ -55,11 +55,19 @@ instructions pane out of nested iframes — the steps are structured JSON.
 
 ## How the engine should do a mission
 
-1. Read `activeIndex` from portal `/challenges` → the current step.
-2. Read `instruction[]` from experiential `/api/missions/{alias}` → the playbook.
-3. **Drive the mocked app** in frame `f[0,0,0]` per the step (type
-   `alice@alice.com`/`P@ssw0rd1!` into Username/Password → submit, log out, etc.).
-   The pod detects the real action and ticks the box; repeat until done.
+1. Read the playbook: `instruction[]` from experiential `/api/missions/{alias}`
+   → the ordered steps and their copy-paste values.
+2. Read current progress **straight from the snapshot**: the side checklist
+   renders each step as a hidden `<input type=checkbox>` in frame `[0,0]`, and
+   `observe` now captures these with `checked` + a `label` (e.g. `"2. Log out"`).
+   The first `checked:false` is the current step — the local equivalent of
+   portal `/challenges` `activeIndex`, without the round-trip. (Portal
+   `/challenges` remains the authority if the local read is ever ambiguous.)
+3. **Drive the mocked app** in frame `[0,0,0]` per the step (type
+   `alice@alice.com`/`P@ssw0rd1!` into Username/Password → submit; log out via
+   the menu's `<a id="menu-link-logout">`, which needs the click primitive's
+   DOM-level fallback since it isn't natively interactable). The pod detects the
+   real action and ticks the box; re-observe and read the boxes until done.
 
 This is the design doc's `value_from` copy-paste case, except the "copy" source
 is the mission API rather than the DOM. UI driving of the target app is the
@@ -77,6 +85,10 @@ responses. Telemetry must be on. See `trainee_sim/cli.py`.
   `done` (so the course progresses)? Presumably experiential-mission → portal on
   the final step. Capture that on a real completion.
 - Can steps be driven headlessly, or does the pod need a visible/interacted DOM?
+  Data point: the app's menu **Logout** isn't natively interactable (side-overlay
+  / hover), so a driven click needs the DOM-level fallback — and that fallback
+  click *did* register with the pod (the app returned to its login form). Whether
+  the pod also credits actions in a fully headless/unrendered DOM is still open.
 - The experiential bearer token: minted by `/api/session/login` from the portal
   session — worth capturing its exchange to fetch `/api/missions` without a
   page reload.

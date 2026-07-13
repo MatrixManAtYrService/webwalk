@@ -447,7 +447,7 @@ class BrowserSession:
             # so without this a frame's step labels never reach the capture.
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
-                entry["text"] = (body.text or "").strip()[:4000]
+                entry["text"] = (body.text or "").strip()[: SETTINGS.frame_text_max]
             except Exception:
                 entry["text"] = None
             frames.append(entry)
@@ -511,6 +511,17 @@ class BrowserSession:
         frames: list[dict[str, Any]] = []
         self._collect_elements(driver, [], elements, frames, depth=0)
         driver.switch_to.default_content()
+        # If a code-editor challenge is on the page, fold its choice-focused view
+        # (stage, options, source) into the snapshot so a solve rule gets the
+        # decision for free. Best-effort — a page without an editor yields None
+        # and never blocks a normal observe.
+        challenge: dict[str, Any] | None = None
+        try:
+            view = self._challenge_sync(driver)
+            if view.get("stage") not in (None, "none"):
+                challenge = view
+        except Exception as exc:
+            logger.debug("challenge_extract_failed", error=str(exc))
         # Pump the network recorder and hand this step the traffic since the last
         # snapshot. Empty while telemetry is off (the recorder ignores it). Frame
         # focus is irrelevant here — CDP Network events are per-target.
@@ -520,6 +531,7 @@ class BrowserSession:
             "title": driver.title,
             "elements": elements,
             "frames": frames,  # nested-frame map + each frame's visible text
+            "challenge": challenge,  # choice-focused editor view, or None
             "dom": driver.page_source,  # top document only (frame text is in `frames`)
             "network": self.network.drain(),  # API traffic this step produced
             # Record the whole window set with each step, so a capture shows what
@@ -827,18 +839,51 @@ class BrowserSession:
     # authenticates. A raw `fetch` can't see an in-memory bearer token; eval can
     # hook XMLHttpRequest to capture it from the app's own live requests.
 
-    def _eval_sync(self, driver: WebDriver, script: str, args: list[Any]) -> Any:
-        driver.switch_to.default_content()
-        # execute_script only returns a value if the body uses `return`; wrap a
-        # bare expression so callers can pass either.
-        body = script if "return" in script else f"return ({script});"
-        return driver.execute_script(body, *args)
+    def _eval_sync(self, driver: WebDriver, script: str, args: list[Any], frame: list[Any]) -> Any:
+        # Descend into the target frame (if any) so the script runs in its
+        # document, then always return to top. Without a frame this is the top
+        # document (the SPA origin).
+        self._enter_frame_path(driver, frame)
+        try:
+            # execute_script only returns a value if the body uses `return`; wrap a
+            # bare expression so callers can pass either.
+            body = script if "return" in script else f"return ({script});"
+            return driver.execute_script(body, *args)
+        finally:
+            driver.switch_to.default_content()
 
-    async def eval_js(self, script: str, args: list[Any] | None = None) -> dict[str, Any]:
-        """Evaluate `script` in the page; returns {"result": <json-able value>}."""
+    async def eval_js(
+        self, script: str, args: list[Any] | None = None, frame: Any = None
+    ) -> dict[str, Any]:
+        """Evaluate `script` in the page; returns {"result": <json-able value>}.
+
+        `frame` (a path like `0` or `0/1`) runs the script inside that nested
+        iframe — the escape hatch for reaching content the top document can't,
+        reusing the same frame vocabulary as `step`/`click`/`observe`.
+        """
         driver = await self._ready()
-        result = await asyncio.to_thread(self._eval_sync, driver, script, args or [])
+        result = await asyncio.to_thread(self._eval_sync, driver, script, args or [], self._parse_frame(frame))
         return {"result": result}
+
+    # --- challenge extraction (the choice-focused editor view) ---
+    #
+    # An SCW challenge is a decision among fixed options. `challenge` scrapes the
+    # code editor + its controls into that decision (stage, enumerated choices
+    # each with a ready-to-fire action, source as context) so the engine picks
+    # rather than re-reading the UI. Pure shaping lives in engine/challenge.py;
+    # this just runs the scraper and hands it over. See the design doc.
+
+    def _challenge_sync(self, driver: WebDriver) -> dict[str, Any]:
+        from trainee_sim.engine.challenge import CHALLENGE_JS, assemble
+
+        driver.switch_to.default_content()  # the scraper walks frames itself
+        raw = driver.execute_script(CHALLENGE_JS) or {"editor": None}
+        return assemble(raw)
+
+    async def challenge(self) -> dict[str, Any]:
+        """Read the current challenge as a decision view (see engine/challenge)."""
+        driver = await self._ready()
+        return await asyncio.to_thread(self._challenge_sync, driver)
 
     async def act(
         self,

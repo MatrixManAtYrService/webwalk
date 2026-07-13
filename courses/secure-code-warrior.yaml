@@ -87,6 +87,27 @@ states:
     url_contains: /mission/course/
     title_contains: "Mission"
 
+  # A COMPLETED mission — same /mission/course/ URL, but the results panel is now
+  # showing with a "Continue" button in frame [0,0] (the mission player chrome).
+  # That button is absent while a mission is in progress, so it cleanly tells "done"
+  # apart from "in progress". Both this and scw-mission match a finished mission;
+  # the `mission-continue` rule is listed first so it wins (see applicable_rules).
+  # Confirmed live on vb-52: on completion the panel reads "Congratulations! You
+  # have successfully completed this mission!" above the Continue button.
+  - id: scw-mission-complete
+    url_contains: /mission/course/
+    elements:
+      - { frame: [0, 0], text: Continue }
+
+  # A challenge task — "locate/fix the vulnerability". Its own URL shape
+  # (/courses/task/challenge/…, NOT /course-task/ or /mission/course/). Continue
+  # off a completed mission lands here. The code panes + selectable line-blocks
+  # live in frame [0]; solving it needs real judgement (pick the vulnerable block),
+  # so there's no rule yet — the walker stops here with context. Discovered live.
+  - id: scw-challenge
+    url_contains: /courses/task/challenge/
+    title_contains: "Challenge"
+
 # Rules describe how to move between states: in state `when`, do `do`, and expect
 # to land in `expect`. The rule runner (engine/runner.py) observes → matches the
 # `when` → acts → re-observes to verify. `expect` is optional: omit it while the
@@ -142,12 +163,24 @@ rules:
       - ui: { action: click, frame: [0], by: xpath, selector: '//button[contains(translate(normalize-space(.),"RESUME","resume"),"resume")]', settle: 3 }
     expect: scw-course-task
 
+  # Advance off a COMPLETED mission via the results-panel "Continue" button. Listed
+  # BEFORE do-mission so that when a finished mission matches both scw-mission and
+  # scw-mission-complete, this wins (applicable_rules is greedy, file order). The
+  # button is in the player chrome, frame [0,0]. Confirmed live on vb-52: Continue
+  # here lands on the follow-up challenge task.
+  - id: mission-continue
+    when: scw-mission-complete
+    do:
+      ui: { action: click, frame: [0, 0], by: xpath,
+            selector: "//button[normalize-space(.)='Continue']", settle: 4 }
+    expect: [scw-challenge, scw-course-task, scw-course-breakdown]
+
   # Drive a mission via its step sub-loop (engine/mission.py + courses/missions.yaml).
-  # The runner reads the current step (instruction[activeIndex]), matches it against
-  # the shared step-handler library, drives it, and verifies the pod advanced —
-  # stopping on an un-encoded step with context. No `expect`: where a completed
-  # mission returns is still an open question (docs/mission-api.md), so we report
-  # `mission-complete` and re-locate rather than assuming a destination.
+  # The runner reads the current step, matches it against the shared step-handler
+  # library, drives it, and verifies the pod ticked that step's checkbox (the
+  # synchronous, observable signal — see docs below). On completion the outer loop
+  # re-observes: the results "Continue" now shows, so scw-mission-complete matches
+  # and `mission-continue` carries the walk onward (no dead stop at mission end).
   - id: do-mission
     when: scw-mission
     do: { mission: {} }

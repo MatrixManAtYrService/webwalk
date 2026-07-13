@@ -66,8 +66,11 @@ password step additionally supports `--secret` (redacted everywhere) and `--env`
 ### Captures
 
 `observe` and `step` capture full page state — url, title, the interactive
-elements, open windows, and the **network traffic** the step produced (see
-below). Captures are:
+elements, the visible text of each nested frame, open windows, and the
+**network traffic** the step produced (see below). Interactive elements include
+hidden **checkbox/radio** state (`checked` plus a nearby `label`), so
+step-completion boxes are readable even when the real input is visually hidden
+behind an icon. Captures are:
 
 - written server-side to `$TS_DATA_DIR/captures/` **only while telemetry is on**;
 - fetched back over HTTP and written **locally** to `./data/captures/` for easy
@@ -95,9 +98,11 @@ Selenium only ever sees the one window/frame it's focused on.
 - **Windows/tabs:** `windows` lists them; `--window <index|latest|first|substr>`
   targets one. New tabs (e.g. "launch course") are not followed automatically.
 - **Frames/iframes:** `observe` recurses into nested iframes; every element
-  carries a `frame` path (`[]` = top, `[0]`, `[3,1]` = nested). Actions take
-  `--frame "3/1"` to act inside a frame. The course content lives behind frames,
-  so this matters constantly.
+  carries a `frame` path (`[]` = top, `[0]`, `[3,1]` = nested), and every frame
+  entry carries its visible `text` (the top-level `dom` is the outer document
+  only, so a frame's content — e.g. the mission instructions checklist in
+  `[0,0]` — is otherwise invisible). Actions take `--frame "3/1"` to act inside a
+  frame. The course content lives behind frames, so this matters constantly.
 
 ### Selectors
 
@@ -111,6 +116,15 @@ attribute (`button[translate="NEXT"]`), not the visible text.
 SPA pages render asynchronously, so an immediate after-snapshot can catch a
 half-built page. Let it settle with `--wait-after <selector>` (poll until it's
 visible) or `--settle <seconds>`.
+
+### Clicking non-interactable elements
+
+Some real controls live in side-overlays / hover menus that Selenium won't
+hit-test — the mocked apps' menu **Logout** (an `<a id="menu-link-logout">` in
+frame `[0,0,0]`), for one. When a `click` finds its element but the native click
+raises *not interactable* / *click intercepted*, it automatically retries as a
+DOM-level click (the app's own handlers fire just the same). The action result
+reports `js_click: true` so a fallback is distinguishable from a native click.
 
 ### Errors
 
@@ -195,9 +209,11 @@ Actions share: `--window`, `--frame`, `--by css\|xpath`, `--settle`,
 ## Status
 
 Working (validated end-to-end against the real Secure Code Warrior training):
-the client/server spine, telemetry gate, window + nested-frame handling,
-scriptable actions with settle/readable-errors, local capture fetch, the
-"where am I" state detector, and gated network (API) capture — including SCW's
-REST calls *and* its Phoenix websocket. Next: the **rule runner**
+the client/server spine, telemetry gate, window + nested-frame handling
+(per-frame text and hidden checkbox/step-completion state now captured),
+scriptable actions with settle/readable-errors (including a DOM-level click
+fallback for overlay/menu controls), local capture fetch, the "where am I"
+state detector, and gated network (API) capture — including SCW's REST calls
+*and* its Phoenix websocket. Next: the **rule runner**
 (`docs/rule-runner-design.md`) — walk the state graph, UI or API, from any
 starting point, toward proving there are no dead ends.
