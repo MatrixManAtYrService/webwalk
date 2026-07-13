@@ -566,12 +566,12 @@ def run(
 
     def _playbook(url: str) -> list[dict[str, Any]]:
         if "steps" not in mission_playbook:
-            events = _call("/network", method="GET").get("events") or []
-            md = _event_json(_find_event(events, "/api/missions/"))
-            if not md:  # not buffered — bounce through about:blank to re-fire it
-                _call("/step", json={"action": "navigate", "value": "about:blank"})
-                rec = _call("/step", json={"action": "navigate", "value": url, "settle": 6.0})
-                events = ((rec.get("record") or {}).get("after") or {}).get("network") or []
+            # Fetch the playbook directly from the experiential player frame —
+            # deterministic, no buffer/reload (see _fetch_mission_def). Fall back
+            # to whatever's still buffered if the direct fetch can't run.
+            md = _fetch_mission_def()
+            if not md:
+                events = _call("/network", method="GET").get("events") or []
                 md = _event_json(_find_event(events, "/api/missions/"))
             mission_playbook["steps"] = sorted((md or {}).get("instruction") or [], key=lambda s: s.get("order", 0))
         return mission_playbook["steps"]
@@ -636,6 +636,7 @@ def fetch(
     data: Annotated[str, typer.Option(help="Request body — a raw string (JSON string sends as JSON)")] = "",
     header: Annotated[list[str], typer.Option("--header", "-H", help="Extra header 'Name: value' (repeatable)")] = [],  # noqa: B006
     page_auth: Annotated[bool, typer.Option("--page-auth", "-a", help="Attach the SPA's own bearer token from web storage")] = False,  # noqa: E501
+    frame: Annotated[str, typer.Option(help="Fire from inside a (nested) iframe's origin, e.g. '0/0'")] = "",
 ) -> None:
     """Fire a request from inside the logged-in page (carries its session).
 
@@ -645,11 +646,17 @@ def fetch(
     --page-auth to reuse the SPA's own token (kept in-browser), or set it yourself
     with -H 'Authorization: Bearer …'. Non-2xx comes back normally (see status/ok).
 
+    A cross-origin API whose token lives in a nested iframe (e.g. the
+    experiential-mission player in frame 0/0, whose bearer is in its own
+    sessionStorage) is reachable with --frame: the request fires from that
+    frame's origin, and --page-auth then finds that frame's token.
+
     \b
     Examples:
         trainee-sim fetch https://portal-api.securecodewarrior.com/ping
         trainee-sim fetch .../auth/resume --page-auth
         trainee-sim fetch .../taskAttempt/<id>/answer -X POST --data '{}' -a
+        trainee-sim fetch .../api/missions/vb-63 --frame 0/0 --page-auth
     """
     headers: dict[str, str] = {}
     for h in header:
@@ -660,7 +667,8 @@ def fetch(
         headers[name.strip()] = value.strip()
     result = _call(
         "/fetch",
-        json={"url": url, "method": method, "headers": headers or None, "body": data or None, "page_auth": page_auth},
+        json={"url": url, "method": method, "headers": headers or None, "body": data or None,
+              "page_auth": page_auth, "frame": frame or None},
     )
     typer.echo(json.dumps(result, indent=2, default=str))
     if not result.get("ok"):
@@ -700,7 +708,7 @@ def challenge(
     so a human or the engine picks instead of scrolling. `--source` dumps the raw
     line-numbered file(s) instead. `stage: "none"` means no code editor is up.
     """
-    result = _call("/challenge")
+    result = _call("/challenge", method="GET")
     if source:
         result = _challenge_source(result)
     typer.echo(json.dumps(result, indent=2, default=str))
@@ -781,6 +789,35 @@ def _event_json(event: dict[str, Any] | None) -> Any:
     return body
 
 
+def _mission_playbook_endpoint() -> str | None:
+    """The mission's `/api/missions/{alias}` URL, derived from the experiential
+    player iframe (frame [0,0]) — origin and alias both read from its own
+    location, so nothing is hardcoded. None if that frame isn't a mission player.
+    """
+    return _call("/eval", json={
+        "frame": "0/0",
+        "script": "return (function(){var m=location.href.match(/\\/missions\\/[^/]+\\/([^/?]+)/);"
+                  "return m ? location.origin + '/api/missions/' + m[1] : null;})();",
+    }).get("result")
+
+
+def _fetch_mission_def() -> dict[str, Any] | None:
+    """Fetch the mission playbook directly from the experiential player frame.
+
+    Fired from inside frame [0,0] (same-origin to its API, with that frame's own
+    `sessionStorage['auth-token']` via page_auth), so it's deterministic: no
+    ring-buffer dependence (the load flood evicts /api/missions and truncates its
+    92KB body at the 64KB cap), and no pod-destroying reload (which logs the app
+    user out mid-mission). See docs/mission-api.md. None if not on a mission.
+    """
+    endpoint = _mission_playbook_endpoint()
+    if not endpoint:
+        return None
+    resp = _call("/fetch", json={"url": endpoint, "frame": "0/0", "page_auth": True})
+    body = resp.get("body") if isinstance(resp, dict) else None
+    return body if isinstance(body, dict) else None
+
+
 @app.command()
 def mission(
     reload: Annotated[bool, typer.Option(help="Reload the mission to capture fresh API traffic (re-inits the pod)")] = False,  # noqa: E501
@@ -793,10 +830,13 @@ def mission(
     reads the captured `/api/missions/*` (the steps) and portal `/challenges`
     (the current `activeIndex`) and prints them. Telemetry must be ON.
 
-    By default it reads what's already buffered; pass --reload to navigate the
-    mission afresh (fires the API again, but re-initialises the pod). If nothing
-    is found, you're probably not on a mission, or telemetry was off on load.
+    By default it fetches the playbook directly from the experiential player
+    frame (deterministic — no buffer scrape, no reload; see docs/mission-api.md).
+    --reload is a legacy last resort that re-navigates the mission (re-fires the
+    API but re-initialises the pod, logging the app user out) — rarely needed now.
+    If nothing is found, you're probably not on a mission, or telemetry was off.
     """
+    events: list[dict[str, Any]] = []
     if reload:
         status = _call("/session/status", method="GET")
         url = status.get("current_url") or ""
@@ -809,15 +849,20 @@ def mission(
         rec = _call("/step", json={"action": "navigate", "value": url, "settle": 6.0, "window": window or None})
         after = (rec.get("record") or {}).get("after") or {}
         events = after.get("network") or []
+        mission_def = _event_json(_find_event(events, "/api/missions/"))
     else:
-        events = _call("/network", method="GET").get("events") or []
+        mission_def = _fetch_mission_def()
+        if not mission_def:  # direct fetch couldn't run — try whatever's buffered
+            events = _call("/network", method="GET").get("events") or []
+            mission_def = _event_json(_find_event(events, "/api/missions/"))
 
-    mission_def = _event_json(_find_event(events, "/api/missions/"))
+    # activeIndex is informational here (the engine reads step checkboxes); it may
+    # be absent when the buffer's been flushed, which is fine.
     challenges = _event_json(_find_event(events, "/task/")) or {}
     if not mission_def:
         typer.echo(
-            "No /api/missions/* traffic captured. Ensure telemetry is on and you're on a "
-            "mission; try `trainee-sim mission --reload`.",
+            "No mission playbook found. Ensure telemetry is on and you're on a mission "
+            "(the experiential player must be loaded in frame [0,0]).",
             err=True,
         )
         raise typer.Exit(1)

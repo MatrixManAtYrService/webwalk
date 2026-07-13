@@ -775,12 +775,19 @@ class BrowserSession:
         body: str | None,
         timeout: float,
         page_auth: bool,
+        frame: list[Any],
     ) -> dict[str, Any]:
-        # Run in the top document (the SCW SPA's origin), not whatever frame a
-        # previous action left us in — the API is same-origin with the top page.
-        driver.switch_to.default_content()
-        driver.set_script_timeout(timeout)
-        result = driver.execute_async_script(self._FETCH_JS, url, method, headers, body, page_auth) or {}
+        # Fire from inside the target frame's document, so the request carries
+        # THAT origin's session and `page_auth` scans THAT frame's web storage.
+        # Default (no frame) is the top document — same-origin with portal-api.
+        # A cross-origin API (e.g. the experiential-mission player, whose bearer
+        # lives in its own iframe's sessionStorage) needs `frame` to be reached.
+        self._enter_frame_path(driver, frame)
+        try:
+            driver.set_script_timeout(timeout)
+            result = driver.execute_async_script(self._FETCH_JS, url, method, headers, body, page_auth) or {}
+        finally:
+            driver.switch_to.default_content()
         raw = result.get("body")
         parsed: Any = raw
         if isinstance(raw, str):
@@ -806,14 +813,17 @@ class BrowserSession:
         body: Any = None,
         timeout: float = 30.0,
         page_auth: bool = False,
+        frame: Any = None,
     ) -> dict[str, Any]:
         """Issue `method url` from inside the page and return {status, ok, body}.
 
         `body` may be a string (sent as-is) or JSON-able (serialized, with a
         JSON content-type unless one is given). With `page_auth`, attach the
-        SPA's own bearer token from web storage (see `_FETCH_JS`). Rate limited.
-        The call also shows up in the network recorder, so telemetry corroborates
-        what went out.
+        SPA's own bearer token from web storage (see `_FETCH_JS`). `frame` (a
+        path like `0/0`) fires the request from inside that nested iframe — so a
+        cross-origin API is hit from its own origin, with that frame's token.
+        Rate limited. The call also shows up in the network recorder, so
+        telemetry corroborates what went out.
         """
         driver = await self._ready()
         hdrs = {k: v for k, v in (headers or {}).items()}
@@ -823,7 +833,8 @@ class BrowserSession:
             hdrs["content-type"] = "application/json"
         await self._throttle_fetch()
         result = await asyncio.to_thread(
-            self._fetch_in_page_sync, driver, url, method.upper(), hdrs, body, timeout, page_auth
+            self._fetch_in_page_sync, driver, url, method.upper(), hdrs, body, timeout, page_auth,
+            self._parse_frame(frame),
         )
         logger.info(
             "fetch_in_page", method=method.upper(), url=url,

@@ -1,10 +1,22 @@
 # Design: challenge observability (surface the choices, read the code)
 
-Status: **proposed** — a small, high-value primitive. Audience: an engineer/agent
-picking this up cold. Read `README.md` (observe/act, frames, the telemetry gate)
-first. This doc is the build spec for making an SCW challenge **legible to the
-engine**: what decision is in front of it, what the enumerated choices are, and
-the code context needed to choose.
+Status: **shipped** — built and validated live against a real SCW challenge
+(fix stage; locate covered by unit fixtures from a real capture). Audience: an
+engineer/agent picking this up cold. Read `README.md` (observe/act, frames, the
+telemetry gate) first. This doc records why an SCW challenge is now **legible to
+the engine**: what decision is in front of it, the enumerated choices, and the
+code context needed to choose.
+
+**What shipped** (verb is `challenge`, not the tentatively-named `code`):
+
+- `trainee-sim challenge` — the decision view (`{stage, options[], submit, …}`);
+  `--source` dumps the raw line-numbered pane(s). Backed by `GET /challenge`.
+- `trainee-sim eval --frame 0 "…"` — run JS inside a nested iframe.
+- `observe` now folds the same view into every capture as `state.challenge`
+  (None when no editor is up), and the per-frame text cap moved from a flat 4000
+  to `TS_FRAME_TEXT_MAX` (default 20000).
+- Pure shaping in `trainee_sim/engine/challenge.py` (`assemble` + `CHALLENGE_JS`),
+  unit-tested in `tests/test_challenge.py`.
 
 ## The problem we hit
 

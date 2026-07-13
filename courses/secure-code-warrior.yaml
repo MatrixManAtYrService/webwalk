@@ -161,7 +161,11 @@ rules:
               body: "{}"
       - ui: { action: click, frame: [0], by: xpath, selector: "//a[contains(normalize-space(.),'Back to course')]", settle: 2 }
       - ui: { action: click, frame: [0], by: xpath, selector: '//button[contains(translate(normalize-space(.),"RESUME","resume"),"resume")]', settle: 3 }
-    expect: scw-course-task
+    # Ends on the same Resume as resume-course, so it lands on whatever activity is
+    # now current — the next task, a mission, or a challenge. Confirmed live: a
+    # video-advance landed on the course's second mission. Accept any of them so
+    # the walk keeps going instead of flagging `unexpected`.
+    expect: [scw-course-task, scw-mission, scw-challenge]
 
   # Advance off a COMPLETED mission via the results-panel "Continue" button. Listed
   # BEFORE do-mission so that when a finished mission matches both scw-mission and

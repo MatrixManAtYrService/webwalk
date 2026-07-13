@@ -193,6 +193,7 @@ class FetchBody(BaseModel):
     body: Any = None  # str sent as-is; anything else JSON-encoded
     timeout: float = 30.0
     page_auth: bool = False  # attach the SPA's own bearer token from web storage
+    frame: str | None = None  # fire from inside this nested iframe's origin, e.g. "0/0"
 
 
 @app.post("/fetch")
@@ -211,6 +212,7 @@ async def fetch(body: FetchBody) -> dict[str, Any]:
             body=body.body,
             timeout=body.timeout,
             page_auth=body.page_auth,
+            frame=body.frame,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
