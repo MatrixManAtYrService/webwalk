@@ -108,12 +108,44 @@ states:
     url_contains: /courses/task/challenge/
     title_contains: "Challenge"
 
+  # A completion/"Results" overlay that pops OVER a solved challenge stage (the
+  # "Bingo! You got that one right!" dialog) with a Continue button in the player
+  # frame [0]. Its URL/title are unchanged, so it also matches scw-challenge — the
+  # dismiss rule is ordered first so it wins (applicable_rules is greedy). The
+  # distinctive tell is the pair of dialog buttons "Review code" + "Continue" in
+  # frame [0]: a plain course-task has a Continue but never a "Review code", so this
+  # signature can't fire on one. Discovered live 2026-07-13 (locate -> fix -> done).
+  #
+  # GENERAL PATTERN: a success overlay must be checked BEFORE acting on the state
+  # underneath it (else the walk clicks blindly under the dialog — a recurring trap).
+  # Model each such overlay as its own state whose signature is a dialog-only
+  # element, and order its dismiss rule ahead of the underlying state's rules.
+  - id: scw-challenge-result
+    url_contains: /courses/task/challenge/
+    elements:
+      - { frame: [0], tag: button, text: "Review code" }
+      - { frame: [0], tag: button, text: "Continue" }
+
 # Rules describe how to move between states: in state `when`, do `do`, and expect
 # to land in `expect`. The rule runner (engine/runner.py) observes → matches the
 # `when` → acts → re-observes to verify. `expect` is optional: omit it while the
 # destination state is still undiscovered — the runner reports where the action
 # actually landed so its signature can be added above. See docs/rule-runner-design.md.
 rules:
+  # OVERLAY-FIRST: dismiss a challenge "Results" success dialog before anything
+  # else. Listed at the TOP so that whenever scw-challenge-result matches (it
+  # overlaps scw-challenge — same URL/title), this wins over do-challenge and the
+  # walk never acts on the editor buried under the dialog. The Continue button is
+  # in the player frame [0] and has no id, so target it by text. It lands on
+  # whatever the dialog gates: the challenge's next stage (locate -> fix), or the
+  # next activity once the whole challenge is done.
+  - id: dismiss-challenge-result
+    when: scw-challenge-result
+    do:
+      ui: { action: click, frame: [0], by: xpath,
+            selector: "//button[normalize-space(.)='Continue']", settle: 4 }
+    expect: [scw-challenge, scw-course-task, scw-course-breakdown, scw-mission]
+
   # Resume the training from the course-breakdown page. The button has no id, so
   # target it by text — case-insensitively, because XPath matches the raw DOM text
   # (which may differ in case from the CSS-rendered "Resume"; see the README).
@@ -126,10 +158,10 @@ rules:
         by: xpath
         selector: '//button[contains(translate(normalize-space(.), "RESUME", "resume"), "resume")]'
         settle: 3          # SPA needs a moment to load the resumed activity
-    # Resume lands on whichever activity is current — a course-task OR a mission.
-    # `expect` accepts either, so the step verifies against reality rather than
-    # assuming one shape (observed live: Resume → a mission on this course).
-    expect: [scw-course-task, scw-mission]
+    # Resume lands on whichever activity is current — a course-task, a mission, OR a
+    # challenge. `expect` accepts any, so the step verifies against reality rather
+    # than assuming one shape (observed live: Resume → a mission, and → a challenge).
+    expect: [scw-course-task, scw-mission, scw-challenge]
 
   # Advance past a VIDEO via the API instead of watching it. The gate is a POST to
   # the task attempt's /answer endpoint; auth is the X-Session-ID header (value =
@@ -188,6 +220,19 @@ rules:
   - id: do-mission
     when: scw-mission
     do: { mission: {} }
+
+  # Answer a challenge via the answer-key library (engine/challenge.py +
+  # courses/challenges.yaml). The runner reads the decision view embedded in the
+  # observe snapshot, matches it to its pre-solved answer, and fires the option's
+  # select + Submit acts — one decision per pass. A solved decision either raises
+  # the "Results" overlay (dismiss-challenge-result carries it onward) or reveals
+  # the next stage, which the outer loop re-enters here. An un-encoded challenge
+  # stops the walk with the decision view as context so an answer key can be added.
+  # Ordered AFTER dismiss-challenge-result so the overlay is always cleared first.
+  - id: do-challenge
+    when: scw-challenge
+    do: { challenge: {} }
+    expect: [scw-challenge-result, scw-challenge, scw-course-task, scw-course-breakdown]
 
   # Advance to the next activity. NOTE: Continue is disabled until the task is
   # complete (for a video, until it's watched to the end — see

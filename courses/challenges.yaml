@@ -1,0 +1,53 @@
+# Challenge ANSWER KEY — the "which option is the answer" macros.
+#
+# A challenge (engine/challenge.py) is a decision among fixed options: LOCATE the
+# vulnerable block, or pick the correct FIX. The *thinking* — read the code, pick
+# the answer — is done once, by hand. What's encoded here is only the ASSOCIATION:
+# a stable content-signature that uniquely identifies a specific challenge -> the
+# option to select. This mirrors courses/missions.yaml one level down: a mission
+# step-handler matches a step's own title/description; a challenge handler matches
+# the challenge's own decision view (stage, vulnerability, file, candidate blocks).
+#
+# Matched on content, NOT on the task URL, so the same key fires on any replay.
+# `answer.select` names the option by its stable `id` — a `file:from-to` range in
+# the locate stage, the integer solution number in the fix stage. (`answer.code_regex`
+# is a locate-stage alternative that matches the highlighted block's code instead,
+# robust to line-number drift, but it needs the scraper's code fields — see the
+# challenge-editor memory.) An unmatched challenge stops the walk with the decision
+# view as context so a new key can be added — after which it, too, runs hands-off.
+
+challenges:
+  # Module 3 (Broken Authentication) — "Session Handling - Exposed Session Tokens",
+  # Python. LOCATE stage: 4 highlighted blocks across auth.py + config.py. The vuln
+  # is that the session id is written into the redirect URL —
+  #   auth.py:34-36  self.send_header('Location', 'https://localhost/?sessionid=%s' % cookie['sessionid'].value)
+  # — which leaks the token via history, logs, and Referer headers. The other blocks
+  # are safe: auth.py:24-25 generates the id with secrets.choice (secure), config.py
+  # sets Argon2 as the hasher (26) and the CA key path (37-38). Solved + validated
+  # live 2026-07-13. The full candidate set fingerprints THIS challenge so the key
+  # can't fire on a different task that merely shares the vulnerability category.
+  - id: exposed-session-tokens-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Exposed Session Tokens"
+      options_include: ["auth.py:24-25", "auth.py:34-36", "config.py:26-26", "config.py:37-38"]
+    answer:
+      select: "auth.py:34-36"
+
+  # Same challenge, FIX stage (reached after the locate success overlay's Continue).
+  # 4 candidate solutions; solution 3 is correct — it moves the token out of the URL
+  # into a Set-Cookie header AND keeps the hardening (secure=True, httponly=True,
+  # HTTPS/443 with the TLS socket wrap). The distractors each reintroduce a flaw:
+  # sol 1 base64-encodes the id but still puts it in the URL; sol 2 sets secure=False
+  # and serves over plain HTTP (port 80, no TLS wrap); sol 4 sets httponly=False
+  # (readable by JS → XSS theft). Solved + validated live 2026-07-13. Fix-stage
+  # options are just 1..N, so the vulnerability category + file disambiguate here.
+  # NOTE: `select` is the solution's on-screen NUMBER; if SCW ever shuffles the
+  # solution order this must move to content-matching the right pane.
+  - id: exposed-session-tokens-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Exposed Session Tokens"
+      file: "auth.py"
+    answer:
+      select: 3

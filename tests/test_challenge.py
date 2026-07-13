@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trainee_sim.engine.challenge import assemble
+from trainee_sim.engine.challenge import assemble, match_challenge
 
 # --- fixtures: raw scraper output, verbatim shape ---
 
@@ -139,6 +139,101 @@ def test_fix_panes_do_not_merge() -> None:
 def test_fix_left_options_let_engine_rebase() -> None:
     view = assemble(FIX_RAW)
     assert [o["id"] for o in view["left_options"]] == [1]  # only "show solution 1" is a numbered left toggle
+
+
+def test_locate_cross_file_line_numbers_do_not_leak() -> None:
+    # Regression: a block whose file isn't the open tab must get code=None even when
+    # the open pane HAPPENS to have those line numbers (per-file numbering). Here the
+    # open auth.py pane has lines 37-38, but the clients.py:37-38 option is a
+    # DIFFERENT file, so it must not borrow auth.py's rows.
+    raw: dict[str, Any] = {
+        "editor": {
+            "framePath": [0], "file": "auth.py", "files": ["auth.py", "clients.py"],
+            "panes": [[{"n": 37, "code": "auth line 37"}, {"n": 38, "code": "auth line 38"}]],
+        },
+        "answers": ["Select auth.py:37-38 as answer", "Select clients.py:37-38 as answer"],
+        "toggles": [], "submit": "Submit answer", "vulnerability": "X",
+    }
+    view = assemble(raw)
+    by_id = {o["id"]: o for o in view["options"]}
+    assert by_id["auth.py:37-38"]["code"] == [{"n": 37, "code": "auth line 37"}, {"n": 38, "code": "auth line 38"}]
+    assert by_id["clients.py:37-38"]["code"] is None  # NOT auth.py's rows
+
+
+# --- the answer key (match_challenge) ---
+
+LOCATE_KEY = [{
+    "id": "expose-locate",
+    "match": {"stage": "locate", "vulnerability_contains": "Improper Authentication",
+              "options_include": ["auth.py:100-100", "clients.py:37-38"]},
+    "answer": {"select": "auth.py:100-100"},
+}]
+
+FIX_KEY = [{
+    "id": "expose-fix",
+    "match": {"stage": "fix", "file": "auth.py"},  # FIX_RAW has vulnerability=None -> key on file
+    "answer": {"select": 3},
+}]
+
+
+def test_match_locate_selects_named_block_then_submit() -> None:
+    view = assemble(LOCATE_RAW)
+    m = match_challenge(LOCATE_KEY, view)
+    assert m is not None
+    assert m["id"] == "expose-locate" and m["stage"] == "locate"
+    select, submit = m["acts"]
+    assert select["selector"] == '[aria-label="Select auth.py:100-100 as answer"]'
+    assert select["frame"] == [0] and select["settle"] == 1
+    # locate's submit is null pre-selection, so it's constructed from the editor frame.
+    assert submit["selector"] == '[aria-label="Submit answer"]' and submit["frame"] == [0]
+
+
+def test_match_fix_selects_solution_and_uses_view_submit() -> None:
+    m = match_challenge(FIX_KEY, assemble(FIX_RAW))
+    assert m is not None and m["stage"] == "fix"
+    select, submit = m["acts"]
+    assert select["selector"] == '[aria-label="On the right side, show solution 3"]'
+    assert submit["selector"] == '[aria-label="Submit answer"]'  # fix view already carries submit
+
+
+def test_match_locate_by_code_regex() -> None:
+    key = [{"id": "by-code", "match": {"stage": "locate"},
+            "answer": {"code_regex": r"_set_session_cookie"}}]
+    m = match_challenge(key, assemble(LOCATE_RAW))
+    assert m is not None
+    # auth.py:100-100 is the only open-pane block whose code matches -> its select act.
+    assert m["acts"][0]["selector"] == '[aria-label="Select auth.py:100-100 as answer"]'
+
+
+def test_no_match_when_vulnerability_differs() -> None:
+    key = [{"id": "other", "match": {"stage": "locate", "vulnerability_contains": "SQL Injection"},
+            "answer": {"select": "auth.py:100-100"}}]
+    assert match_challenge(key, assemble(LOCATE_RAW)) is None
+
+
+def test_no_match_when_fingerprint_block_absent() -> None:
+    key = [{"id": "fp", "match": {"stage": "locate", "options_include": ["nope.py:1-1"]},
+            "answer": {"select": "auth.py:100-100"}}]
+    assert match_challenge(key, assemble(LOCATE_RAW)) is None
+
+
+def test_no_match_when_answer_option_not_present() -> None:
+    # The challenge matches, but the named answer block isn't among the options
+    # (e.g. already answered and removed) -> no acts, so the handler doesn't fire.
+    key = [{"id": "gone", "match": {"stage": "locate"}, "answer": {"select": "auth.py:999-999"}}]
+    assert match_challenge(key, assemble(LOCATE_RAW)) is None
+
+
+def test_wrong_stage_does_not_match() -> None:
+    assert match_challenge(LOCATE_KEY, assemble(FIX_RAW)) is None  # locate key vs a fix view
+
+
+def test_empty_match_never_fires() -> None:
+    assert match_challenge([{"id": "x", "match": {}, "answer": {"select": 1}}], assemble(FIX_RAW)) is None
+
+
+def test_match_none_when_no_editor() -> None:
+    assert match_challenge(LOCATE_KEY, assemble({"editor": None})) is None
 
 
 # --- no editor ---

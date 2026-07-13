@@ -39,6 +39,7 @@ from typing import Any
 
 from transitions import Machine
 
+from trainee_sim.engine.challenge import match_challenge
 from trainee_sim.engine.matcher import match_report, match_states
 from trainee_sim.engine.mission import match_step, render_actions
 
@@ -81,6 +82,11 @@ def _step_brief(step: dict[str, Any]) -> dict[str, Any]:
 def _is_mission_action(do: Any) -> bool:
     """True if a rule's `do` is (or contains) a `mission` sub-flow action."""
     return any(isinstance(a, dict) and "mission" in a for a in (do if isinstance(do, list) else [do]))
+
+
+def _is_challenge_action(do: Any) -> bool:
+    """True if a rule's `do` is (or contains) a `challenge` sub-flow action."""
+    return any(isinstance(a, dict) and "challenge" in a for a in (do if isinstance(do, list) else [do]))
 
 
 def _template(value: str, ctx: dict[str, Any]) -> str:
@@ -188,6 +194,7 @@ class Runner:
         read_mission: ReadMissionFn | None = None,
         mission_steps: list[dict[str, Any]] | None = None,
         verify_step: VerifyStepFn | None = None,
+        challenge_handlers: list[dict[str, Any]] | None = None,
     ) -> None:
         self.states = states
         self.rules = rules
@@ -200,6 +207,7 @@ class Runner:
         self._read_mission = read_mission     # reads {active_index, steps} for a mission
         self.mission_steps = mission_steps or []  # the shared step-handler library
         self._verify_step = verify_step       # confirms a step's /complete event fired
+        self.challenge_handlers = challenge_handlers or []  # the challenge answer key
         # States explicitly flagged `terminal: true` are legitimate endpoints (e.g.
         # course complete). Any *other* state with no applicable rule is "stuck" —
         # we simply haven't encoded how to act there yet — not "done".
@@ -315,6 +323,50 @@ class Runner:
                         "steps_done": steps_done}
             idx += 1
         return {"status": "mission-max-steps", "steps_done": steps_done}
+
+    # --- the challenge sub-flow (one level down: a decision, not a page state) ---
+
+    def _challenge_context(self, payload: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+        """Stuck-context for a challenge we have no answer key for: the decision
+        view itself — stage, vulnerability, and the enumerated options with their
+        code — so a human can pick the answer and author a `challenges.yaml` key."""
+        return {
+            "url": payload.get("url"),
+            "stage": view.get("stage"),
+            "file": view.get("file"),
+            "vulnerability": view.get("vulnerability"),
+            "decision": view.get("decision"),
+            "options": [{"id": o.get("id"), "code": o.get("code")} for o in view.get("options") or []],
+        }
+
+    def _drive_challenge(self, payload: dict[str, Any], auto: bool) -> dict[str, Any]:
+        """Answer ONE challenge decision: read the embedded decision view, match it
+        against the answer-key library, and fire the option's select + Submit acts.
+
+        Deliberately one decision per call, NOT a sub-loop: a challenge stage either
+        completes (a success overlay appears — handled by an overlay rule in the
+        OUTER loop, which is why that rule must precede this one) or advances to the
+        next stage (locate -> fix), which the outer loop re-enters as `scw-challenge`
+        again. So the runner re-observes between decisions and lets its page rules
+        route each transition — no completion-detection guesswork here. Handlers
+        match on the challenge's own content, so the same key fires on any replay.
+        """
+        view = payload.get("challenge")
+        if not view or view.get("stage") in (None, "none"):
+            # No decidable editor here — the overlay is likely up covering it; report
+            # so the outer loop's overlay/next rules (or a human) can take over.
+            return {"status": "challenge-none"}
+        handler = match_challenge(self.challenge_handlers, view)
+        if handler is None:
+            return {"status": "challenge-stuck", "stage": view.get("stage"),
+                    "context": self._challenge_context(payload, view)}
+        if not auto and self._confirm is not None and not self._confirm(
+            [f"challenge {view.get('stage')}: {view.get('vulnerability')}"], {"id": handler["id"]}
+        ):
+            return {"status": "aborted", "stage": view.get("stage")}
+        for act in handler["acts"]:
+            self._act(act)
+        return {"status": "solved", "id": handler["id"], "stage": view.get("stage")}
 
     # --- location ---
 
@@ -480,6 +532,21 @@ class Runner:
                           "url": url, "history": history}
                 if mres.get("context"):
                     result["context"] = mres["context"]
+                return result
+
+            # A challenge rule answers one decision via the answer-key library, then
+            # yields back to the outer loop, which re-observes and routes what comes
+            # next — a success overlay to dismiss, the fix stage, or the next activity.
+            if _is_challenge_action(rule["do"]):
+                cres = self._drive_challenge(payload, auto)
+                history.append({"rule": rule["id"], "from": matched, "challenge": cres})
+                if cres.get("status") == "solved":
+                    getattr(self, rule["id"])()  # advance the flow model past this decision
+                    continue                      # re-observe: overlay / next stage / next task
+                result = {"status": "stuck", "rule": rule["id"], "challenge": cres,
+                          "url": url, "history": history}
+                if cres.get("context"):
+                    result["context"] = cres["context"]
                 return result
 
             self._do_action(rule["do"], payload)

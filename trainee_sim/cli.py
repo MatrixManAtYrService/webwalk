@@ -484,6 +484,7 @@ def run(
     to: Annotated[str, typer.Option(help="Walk until we reach this state id (else run until no rule applies)")] = "",
     states: Annotated[str, typer.Option(help="YAML file of state signatures + rules")] = "courses/secure-code-warrior.yaml",  # noqa: E501
     missions: Annotated[str, typer.Option(help="YAML file of reusable mission step-handlers")] = "courses/missions.yaml",  # noqa: E501
+    challenges: Annotated[str, typer.Option(help="YAML file of challenge answer-key handlers")] = "courses/challenges.yaml",  # noqa: E501
     window: Annotated[str, typer.Option(help="Observe/act on this window (index/'latest'/url substring)")] = "",
     once: Annotated[bool, typer.Option(help="Take a single step, then stop")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't prompt before each step (autonomous)")] = False,
@@ -522,6 +523,11 @@ def run(
     # walker enters a mission).
     missions_path = Path(missions)
     mission_steps = (yaml.safe_load(missions_path.read_text()) or {}).get("steps", []) if missions_path.exists() else []
+
+    # The challenge answer-key library (optional — only used when the walker stops on
+    # a challenge task): a content-signature per solved challenge -> the option to pick.
+    challenges_path = Path(challenges)
+    challenge_handlers = (yaml.safe_load(challenges_path.read_text()) or {}).get("challenges", []) if challenges_path.exists() else []  # noqa: E501
 
     def observe() -> dict[str, Any]:
         result = _call("/observe", json={"label": "run", "window": window or None})
@@ -626,6 +632,7 @@ def run(
     runner = Runner(
         state_defs, rule_defs, observe, act, confirm=confirm, http=http_fetch, eval_js=eval_js,
         api_hosts=api_hosts, read_mission=read_mission, mission_steps=mission_steps, verify_step=verify_step,
+        challenge_handlers=challenge_handlers,
     )
     result = runner.run(to=to or None, max_steps=1 if once else 20, auto=yes)
     typer.echo(json.dumps(result, indent=2, default=str))

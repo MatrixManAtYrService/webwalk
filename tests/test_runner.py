@@ -460,3 +460,87 @@ def test_unknown_result_reports_near_miss_states() -> None:
     assert near[0]["id"] == "login"          # ranked first: it hit the url signal
     assert near[0]["signals"] == 1
     assert any("id" in reason for reason in near[0]["reasons"])  # explains the miss
+
+
+# --- challenge sub-flow (a decision one level down: pick the answer, then Submit) ---
+
+CHALLENGE_STATES = [
+    {"id": "challenge", "url_contains": "/challenge/"},
+    {"id": "done", "url_contains": "/done/", "terminal": True},
+]
+CHALLENGE_RULE = {"id": "do-challenge", "when": "challenge", "do": {"challenge": {}},
+                  "expect": ["challenge", "done"]}
+
+# The decision view the runner reads from `payload["challenge"]` (embedded in observe).
+def _sel_act(label: str) -> dict[str, Any]:
+    return {"action": "click", "by": "css", "selector": f'[aria-label="Select {label} as answer"]', "frame": [0]}
+
+
+LOCATE_VIEW = {
+    "stage": "locate", "file": "auth.py",
+    "vulnerability": "Session Handling - Exposed Session Tokens",
+    "decision": "Identify which 1 of 2 highlighted blocks is vulnerable",
+    "options": [
+        {"id": "auth.py:34-36", "code": [{"n": 34, "code": "leak"}], "act": _sel_act("auth.py:34-36")},
+        {"id": "auth.py:24-25", "code": [{"n": 24, "code": "safe"}], "act": _sel_act("auth.py:24-25")},
+    ],
+    "submit": None,  # locate: no Submit until a block is selected -> runner constructs it
+}
+CHALLENGE_KEY = [{
+    "id": "est-locate",
+    "match": {"stage": "locate", "vulnerability_contains": "Exposed Session Tokens"},
+    "answer": {"select": "auth.py:34-36"},
+}]
+
+
+class _ChFake:
+    """Scripted observe payloads (some carrying a `challenge` view) + acted record."""
+
+    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        self._p = payloads
+        self._i = 0
+        self.acted: list[dict[str, Any]] = []
+
+    def observe(self) -> dict[str, Any]:
+        p = self._p[min(self._i, len(self._p) - 1)]
+        self._i += 1
+        return p
+
+    def act(self, ui: dict[str, Any]) -> None:
+        self.acted.append(ui)
+
+
+def _ch_payload(url: str, view: dict[str, Any] | None = None) -> dict[str, Any]:
+    p: dict[str, Any] = {"url": url, "title": "", "elements": []}
+    if view is not None:
+        p["challenge"] = view
+    return p
+
+
+def test_challenge_answers_named_block_then_continues() -> None:
+    # observe #1: the challenge decision -> do-challenge fires select + Submit and
+    # continues; observe #2: the next (terminal) activity -> done.
+    fake = _ChFake([_ch_payload("/challenge/x", LOCATE_VIEW), _ch_payload("/done/y")])
+    runner = Runner(CHALLENGE_STATES, [CHALLENGE_RULE], fake.observe, fake.act,
+                    challenge_handlers=CHALLENGE_KEY)
+    result = runner.run(auto=True)
+    assert result["status"] == "done"
+    assert [a["selector"] for a in fake.acted] == [
+        '[aria-label="Select auth.py:34-36 as answer"]',
+        '[aria-label="Submit answer"]',  # constructed (locate view's submit was null)
+    ]
+    ch = result["history"][0]["challenge"]
+    assert ch["status"] == "solved" and ch["id"] == "est-locate"
+
+
+def test_challenge_without_answer_key_is_stuck_with_the_decision() -> None:
+    fake = _ChFake([_ch_payload("/challenge/x", LOCATE_VIEW)])
+    runner = Runner(CHALLENGE_STATES, [CHALLENGE_RULE], fake.observe, fake.act,
+                    challenge_handlers=[])  # no keys authored yet
+    result = runner.run(auto=True)
+    assert result["status"] == "stuck"
+    assert result["challenge"]["status"] == "challenge-stuck"
+    # The stuck context is the decision itself, so a human can author the missing key.
+    assert result["context"]["vulnerability"] == "Session Handling - Exposed Session Tokens"
+    assert [o["id"] for o in result["context"]["options"]] == ["auth.py:34-36", "auth.py:24-25"]
+    assert fake.acted == []  # nothing fired
