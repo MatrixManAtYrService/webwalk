@@ -180,7 +180,7 @@ def test_http_action_templates_captures_and_guards() -> None:
         "expect": "task",
     }
     fakes = _Fakes(["/course-task/COURSE/MOD-1", "/course-task/COURSE/MOD-1"])
-    runner = Runner(STATES, [rule], fakes.observe, fakes.act, http=http, eval_js=lambda js: "SID-42")
+    runner = Runner(STATES, [rule], fakes.observe, fakes.act, http=http, eval_js=lambda js, frame=None: "SID-42")
     runner.run(max_steps=1, auto=True)
 
     assert [c["method"] for c in calls] == ["GET", "POST"]
@@ -227,15 +227,20 @@ class _MissionFake:
     """A fixed playbook + entry index, a scripted per-step /complete verifier, and a
     record of driven actions — the injected surface the runner's mission loop uses."""
 
-    def __init__(self, active_index: int, steps: list[dict[str, Any]], completes: bool = True) -> None:
+    def __init__(self, active_index: int, steps: list[dict[str, Any]], completes: bool = True,
+                 checkable: set[int] | None = None) -> None:
         self._active_index = active_index
         self._steps = steps
         self._completes = completes
+        self._checkable = checkable
         self.acted: list[dict[str, Any]] = []
         self.verified: list[str] = []
 
     def read(self) -> dict[str, Any]:
-        return {"active_index": self._active_index, "steps": self._steps}
+        out: dict[str, Any] = {"active_index": self._active_index, "steps": self._steps}
+        if self._checkable is not None:
+            out["checkable"] = self._checkable
+        return out
 
     def act(self, ui: dict[str, Any]) -> None:
         self.acted.append(ui)
@@ -273,6 +278,79 @@ def test_mission_stuck_on_unencoded_step_carries_context() -> None:
     assert result["mission"]["status"] == "mission-stuck"
     assert result["context"]["step"]["title"] == "Log out"
     assert mf.acted == []  # nothing driven — we don't know how yet
+
+
+def test_mission_skips_informational_step_with_no_checkbox() -> None:
+    # An informational step (order 1) has no checklist checkbox — its order is absent
+    # from `checkable`. The loop must advance past it without acting or verifying,
+    # then drive the real step that follows. Mirrors SCW's "Inspect the URL" gap.
+    info_step = {"order": 1, "id": "s1", "title": "Inspect the URL", "description": "just read this"}
+    login2 = {"order": 2, "id": "s2", "title": "Log in as Bob", "description": "log in as `bob@bob.com`"}
+    mf = _MissionFake(1, [LOGIN_STEP, info_step, login2], checkable={0, 2})
+    result = _mission_runner(mf, LOGIN_LIB).run(auto=True)
+    assert result["status"] == "mission-complete"
+    # The informational step drove nothing and was not verified; only the real step 2 did.
+    assert mf.acted == [{"action": "type", "frame": [0, 0, 0], "selector": "#Username", "value": "bob@bob.com"}]
+    assert mf.verified == [2]
+    done = result["mission"]["steps_done"]
+    assert done[0] == {"index": 1, "handler": None, "step_id": "s1", "informational": True, "completed": True}
+    assert done[1]["handler"] == "login-as"
+
+
+def test_mission_handler_resolves_page_sourced_context() -> None:
+    # A handler can pull a var from the LIVE page (its `context` block), not just from
+    # the step text — e.g. a stolen session token sitting in the mission browser's URL
+    # bar — evaluated in a nested frame, and template it into `do`. Mirrors SCW's
+    # "Take over Bobby's session" step.
+    lib = [{
+        "id": "take-over",
+        "match": {"title_regex": "(?i)^take over"},
+        "context": {"token": {"eval": "grab-token", "frame": "0/0"}},
+        "do": [{"ui": {"action": "type", "frame": [0, 0], "selector": "#cookie", "value": "{token}"}}],
+    }]
+    step = {"order": 0, "id": "s0", "title": "Take over Bobby's session", "description": "steal it"}
+    mf = _MissionFake(0, [step])
+    evals: list[tuple[str, str | None]] = []
+
+    def eval_js(js: str, frame: str | None = None) -> Any:
+        evals.append((js, frame))
+        return "BOBBY-TOKEN"
+
+    runner = Runner(MISSION_STATES, [MISSION_RULE], _rich_observe(_payload("/mission/x")), mf.act,
+                    read_mission=mf.read, mission_steps=lib, verify_step=mf.verify, eval_js=eval_js)
+    result = runner.run(auto=True)
+    assert result["status"] == "mission-complete"
+    assert evals == [("grab-token", "0/0")]  # eval ran in the specified frame
+    # …and the page-sourced token was templated into the action.
+    assert mf.acted == [{"action": "type", "frame": [0, 0], "selector": "#cookie", "value": "BOBBY-TOKEN"}]
+
+
+def test_mission_eval_action_runs_templated_js_in_a_frame() -> None:
+    # An `eval` action runs JS in a (nested) frame — the escape hatch for what
+    # click/type can't do, e.g. writing a stolen cookie into the app frame. The
+    # page-sourced token is templated into the script before it runs. Mirrors the
+    # take-over-session handler's cookie write.
+    lib = [{
+        "id": "steal",
+        "match": {"title_regex": "(?i)^take over"},
+        "context": {"token": {"eval": "grab", "frame": "0/0"}},
+        "do": [{"eval": {"frame": "0/0/0", "script": "document.cookie='S={token}'"}}],
+    }]
+    step = {"order": 0, "id": "s0", "title": "Take over the session", "description": "x"}
+    mf = _MissionFake(0, [step])
+    calls: list[tuple[str, str | None]] = []
+
+    def eval_js(js: str, frame: str | None = None) -> Any:
+        calls.append((js, frame))
+        return "TOK"
+
+    runner = Runner(MISSION_STATES, [MISSION_RULE], _rich_observe(_payload("/mission/x")), mf.act,
+                    read_mission=mf.read, mission_steps=lib, verify_step=mf.verify, eval_js=eval_js)
+    result = runner.run(auto=True)
+    assert result["status"] == "mission-complete"
+    # First call resolves the context token; second runs the templated cookie write in the app frame.
+    assert calls == [("grab", "0/0"), ("document.cookie='S=TOK'", "0/0/0")]
+    assert mf.acted == []  # this handler drives no click/type — only eval
 
 
 def test_mission_blocked_when_complete_event_never_fires() -> None:

@@ -82,6 +82,99 @@ steps:
       - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//a[normalize-space(.)='menu']", settle: 1 }
       - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-logout', settle: 2 }
 
+  # Visit an endpoint in the mocked app by typing the path into the mission's
+  # simulated address bar. The step reads "Navigate to the /`<path>` endpoint"; the
+  # path is the backtick-quoted token after the slash. Confirmed LIVE on the Broken
+  # Authentication / "Exposed Session Tokens" mission (step "Visit invoices"): the
+  # address bar `#browserBar` (frame [0,0], NOT the app frame [0,0,0] — it's the
+  # mission player's chrome) AUTO-PREPENDS the leading "/", so type the BARE path
+  # without it — typing "/invoices" yields "//invoices" → Page Not Found. Enter
+  # submits (the bar has no click target). Reusable: many missions send you to a
+  # hidden/forbidden endpoint that has no menu link, which is the whole point.
+  - id: navigate-endpoint
+    match:
+      desc_regex: '(?i)navigate to the /`[^`]+` endpoint'
+    extract:
+      path: { from: description, regex: '/`([^`]+)`' }
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: '{path}', enter: true, settle: 3 }
+
+  # View a payment receipt (Broken Auth / "Exposed Session Tokens" mission, step
+  # "View a receipt"). Under received invoices the paid ones expose a "RECEIPT" link
+  # (`#receipt-btn`, an <a> in the app frame [0,0,0]) whose href leaks the session
+  # token in a `?session=` query param — the very flaw the mission teaches. Clicking
+  # it navigates to the detailed receipt and ticks the step. Confirmed LIVE.
+  - id: view-receipt
+    match:
+      title_regex: '(?i)^view a receipt'
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#receipt-btn', settle: 3 }
+
+  # Send a payment reminder to a debtor (Broken Auth / "Exposed Session Tokens"
+  # mission, step "Send a reminder"). The debtor's account number is the
+  # parenthesized number in the copy ("Bobby's (999999)"). Sequence, all in the app
+  # frame [0,0,0], confirmed LIVE: go to the sent-invoices list (via the browserBar
+  # in [0,0]); click "View" on the row that contains that account number — note the
+  # link's raw DOM text is "View", NOT the CSS-uppercased "VIEW" the page shows (see
+  # README's XPath gotcha); click `#reminder-btn` (opens a `#modal`); confirm with
+  # `#confirm-reminder` ("YES" → /sendreminder), which ticks the step and triggers
+  # the debtor's auto-reply email. LIMITATION: assumes an unpaid invoice to that
+  # account already exists; the step's "else create one" fallback isn't handled.
+  - id: send-reminder
+    match:
+      title_regex: '(?i)^send a reminder'
+    extract:
+      account: { from: description, regex: '\((\d+)\)' }
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'invoices', enter: true, settle: 3 }
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//tr[contains(., '{account}')]//a[normalize-space(.)='View']", settle: 3 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#reminder-btn', settle: 2 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#confirm-reminder', settle: 3 }
+
+  # Check the debtor's reply email (Broken Auth / "Exposed Session Tokens" mission,
+  # step "Check Bobby's answer"). The reminder triggered an auto-reply in which the
+  # debtor naively links to his OWN receipt — whose URL leaks his session token.
+  # Sequence, confirmed LIVE, all in the mission-player chrome frame [0,0]: switch to
+  # the Email Client tab (`#browser-tab-EMAIL_CLIENT`); open the reply (the inbox row
+  # button, subject "Proof of Payment"); click its "link to receipt" <a>. That opens
+  # a Forbidden error page (the receipt is the debtor's, not ours) whose URL carries
+  # his `?session=` token — which the next step steals. Just opening it ticks the step.
+  - id: check-answer
+    match:
+      title_regex: '(?i)^check .* answer'
+    do:
+      - ui: { action: click, frame: [0, 0], by: css,   selector: '#browser-tab-EMAIL_CLIENT', settle: 3 }
+      - ui: { action: click, frame: [0, 0], by: xpath, selector: "//button[contains(., 'Proof of Payment')]", settle: 2 }
+      - ui: { action: click, frame: [0, 0], by: xpath, selector: "//a[contains(normalize-space(.), 'link to receipt')]", settle: 3 }
+
+  # Hijack the debtor's session (Broken Auth / "Exposed Session Tokens" mission, step
+  # "Take over Bobby's session") — the payoff, and the first handler to (a) read a
+  # value from the LIVE page rather than the step text and (b) use an `eval` action.
+  # After `check-answer`, the mission browser's URL bar (`#browserBar` in frame [0,0])
+  # holds the debtor's receipt URL with his `?session=<token>`; the `context` block
+  # scrapes that token via an eval in that frame.
+  #
+  # The instructions say to paste it into the on-screen cookie editor and SET COOKIE,
+  # but that editor is a React-controlled input: a Selenium-typed value never reaches
+  # its state, so SET COOKIE silently re-saves the OLD cookie (verified LIVE — the
+  # app cookie stayed Alice's). The VikingBankSessionId cookie is NOT HttpOnly, so we
+  # instead write it straight into the app frame [0,0,0] with an `eval` action, then
+  # navigate to /Home (browserBar auto-prepends "/", so type the bare "Home"). The
+  # pod verifies the session, not the editor UI: this ticks the step and completes the
+  # mission ("Congratulations!" results panel). Confirmed LIVE end-to-end.
+  - id: take-over-session
+    match:
+      title_regex: '(?i)^take over'
+    context:
+      token:
+        frame: "0/0"
+        # Tolerate both `session=<tok>` (the intended error page, logged in) and the
+        # URL-encoded `session%3D<tok>` (if the app bounced to a login redirect first).
+        eval: "return document.querySelector('#browserBar').value.match(/session(?:=|%3D)([^&]+)/)[1]"
+    do:
+      - eval: { frame: "0/0/0", script: "document.cookie='VikingBankSessionId={token}; path=/'" }
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'Home', enter: true, settle: 4 }
+
   # Transfer money (vb-52 step 5, "Transfer money from Bob to Alice"). Selectors,
   # frame [0,0,0], and the required-Description quirk were all confirmed LIVE: the
   # form silently re-renders "Please enter a description" and does NOT tick the

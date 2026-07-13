@@ -82,16 +82,29 @@ def _render(obj: Any, ctx: dict[str, Any]) -> Any:
     return obj
 
 
+# Public alias: the runner reuses this to template page-sourced context vars into a
+# handler's `do` in a second pass (after match_step has filled the text vars).
+render_actions = _render
+
+
 def match_step(steps: list[dict[str, Any]], step: dict[str, Any]) -> dict[str, Any] | None:
     """Find the first handler whose signature matches `step`, or None if it's an
     un-encoded step (→ the runner stops with context so a handler can be added).
 
-    Returns `{"id", "ctx", "do"}`: the handler id, the values extracted from the
-    step text, and the handler's `do` actions with those values already templated
-    in — ready to hand straight to the runner's act path.
+    Returns `{"id", "ctx", "do", "context"}`: the handler id, the values extracted
+    from the step *text*, and the handler's `do` actions with those text values
+    already templated in — ready to hand straight to the runner's act path.
+
+    `context` is the handler's optional page-sourced context spec (unresolved): vars
+    read from the LIVE page (an `eval` in a frame, a `url_regex`) rather than the
+    step text — e.g. a stolen session token sitting in the mission browser's URL bar.
+    Resolving it needs I/O (eval/observe), so it's left for the runner; `do` keeps
+    its `{page_var}` placeholders untouched here (unknown names pass through) for the
+    runner's second render pass.
     """
     for rule in steps or []:
         if _step_matches(rule.get("match") or {}, step):
             ctx = _extract(rule.get("extract"), step)
-            return {"id": rule.get("id"), "ctx": ctx, "do": _render(rule.get("do"), ctx)}
+            return {"id": rule.get("id"), "ctx": ctx, "do": _render(rule.get("do"), ctx),
+                    "context": rule.get("context")}
     return None

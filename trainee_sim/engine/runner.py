@@ -40,7 +40,7 @@ from typing import Any
 from transitions import Machine
 
 from trainee_sim.engine.matcher import match_report, match_states
-from trainee_sim.engine.mission import match_step
+from trainee_sim.engine.mission import match_step, render_actions
 
 # Tags whose elements are worth offering as things to act on when the walker
 # stops — the raw material for a UI rule's selector. Everything else (divs,
@@ -60,10 +60,12 @@ ObserveFn = Callable[[], dict[str, Any]]          # () -> observe payload (state
 ActFn = Callable[[dict[str, Any]], None]          # (ui-action dict) -> perform it
 ConfirmFn = Callable[[list[str], dict[str, Any]], bool]  # (matched states, rule) -> proceed?
 HttpFn = Callable[[str, str, dict[str, str], str | None], dict[str, Any]]  # (method,url,headers,body)->resp
-EvalFn = Callable[[str], Any]                     # (js) -> evaluated value
-# () -> {active_index, steps:[instruction…]} for the mission we're on, or None.
-# `active_index` is the current step: derived from the observable step-checkboxes
-# (the first unticked one), not portal's stale `activeIndex` — see the CLI wiring.
+EvalFn = Callable[[str, str | None], Any]         # (js, frame) -> evaluated value (frame None = top)
+# () -> {active_index, steps:[instruction…], checkable:{orders…}} for the mission
+# we're on, or None. `active_index` is the current step: derived from the observable
+# step-checkboxes (the first unticked one), not portal's stale `activeIndex`.
+# `checkable` is the set of step orders that actually have a checklist checkbox;
+# orders missing from it are informational (no box, no verification). See CLI wiring.
 ReadMissionFn = Callable[[], dict[str, Any] | None]
 # (step order) -> did the pod tick that step's checkbox within a timeout? The
 # checkbox `checked` state is the synchronous, in-snapshot completion signal.
@@ -266,6 +268,12 @@ class Runner:
             return {"status": "mission-unreadable"}
         steps = ms.get("steps") or []
         idx = ms.get("active_index") or 0  # portal's coarse entry point (resume hint)
+        # Orders that have a checklist checkbox — i.e. pod-gated steps. A step whose
+        # order is absent from a NON-EMPTY set is *informational* (e.g. "Inspect the
+        # URL"): the checklist renders no box for it, so there's nothing to do and
+        # nothing to verify — we just advance past it. When the set is empty/None the
+        # pod boxes simply weren't captured, so we don't skip anything.
+        checkable = ms.get("checkable")
         steps_done: list[dict[str, Any]] = []
 
         for _ in range(max_steps):
@@ -273,6 +281,12 @@ class Runner:
                 return {"status": "complete", "active_index": idx, "steps_done": steps_done}
 
             step = steps[idx]
+            if checkable and step.get("order") not in checkable:
+                steps_done.append({"index": idx, "handler": None, "step_id": step.get("id"),
+                                   "informational": True, "completed": True})
+                idx += 1
+                continue
+
             handler = match_step(self.mission_steps, step)
             if handler is None:
                 return {"status": "mission-stuck", "active_index": idx, "step": _step_brief(step),
@@ -282,7 +296,16 @@ class Runner:
             ):
                 return {"status": "aborted", "active_index": idx, "steps_done": steps_done}
 
-            self._do_action(handler["do"], {})
+            # A handler may source vars from the LIVE page (its `context` block) — a
+            # value scraped from the DOM/URL, like a stolen session token — not just
+            # from the step text. match_step left those `{page_var}` placeholders in
+            # `do`; resolve them now (needs I/O, so it's here not in the pure matcher)
+            # and template them in with a second render pass before acting.
+            do = handler["do"]
+            if handler.get("context"):
+                page_ctx = self._build_context(handler["context"], self._observe())
+                do = render_actions(do, page_ctx)
+            self._do_action(do, {})
             completed = bool(self._verify_step and self._verify_step(step.get("order")))
             steps_done.append({"index": idx, "handler": handler["id"],
                                "step_id": step.get("id"), "completed": completed})
@@ -312,7 +335,7 @@ class Runner:
     # --- actions (ui or http) ---
 
     def _do_action(self, do: Any, payload: dict[str, Any]) -> None:
-        """Execute a rule's `do` — a single action or a list, ui and/or http."""
+        """Execute a rule's `do` — a single action or a list, `ui`, `http`, or `eval`."""
         for action in do if isinstance(do, list) else [do]:
             if "ui" in action:
                 self._act(action["ui"])
@@ -320,8 +343,16 @@ class Runner:
                 if self._http is None:
                     raise RuntimeError("this rule needs an http action but no http fn was wired")
                 self._run_http(action["http"], payload)
+            elif "eval" in action:
+                # Run JS in the page (optionally a nested `frame`) — the escape hatch
+                # for what click/type can't do, e.g. writing a stolen session cookie
+                # straight into the app frame when the UI's editor is React-flaky.
+                if self._eval is None:
+                    raise RuntimeError("this rule needs an eval action but no eval fn was wired")
+                spec = action["eval"]
+                self._eval(spec["script"], spec.get("frame"))
             else:
-                raise ValueError(f"rule action has neither 'ui' nor 'http': {action!r}")
+                raise ValueError(f"rule action has none of 'ui'/'http'/'eval': {action!r}")
 
     def _build_context(self, spec: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any]:
         """Seed http-template variables from page JS (`eval`) or the page URL (`url_regex`)."""
@@ -331,7 +362,9 @@ class Runner:
             if "eval" in src:
                 if self._eval is None:
                     raise RuntimeError("context uses `eval` but no eval fn was wired")
-                ctx[name] = self._eval(src["eval"])
+                # `frame` (optional) targets a nested iframe — a stolen token lives in
+                # the mission browser's chrome frame, not the top document.
+                ctx[name] = self._eval(src["eval"], src.get("frame"))
             elif "url_regex" in src:
                 m = re.search(src["url_regex"], url)
                 ctx[name] = m.group(src.get("group", 1)) if m else None

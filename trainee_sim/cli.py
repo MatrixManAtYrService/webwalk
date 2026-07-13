@@ -550,8 +550,8 @@ def run(
     def http_fetch(method: str, url: str, headers: dict[str, str], body: str | None) -> dict[str, Any]:
         return _call("/fetch", json={"url": url, "method": method, "headers": headers or None, "body": body})
 
-    def eval_js(script: str) -> Any:
-        return _call("/eval", json={"script": script}).get("result")
+    def eval_js(script: str, frame: str | None = None) -> Any:
+        return _call("/eval", json={"script": script, "frame": frame}).get("result")
 
     def confirm(matched: list[str], rule: dict[str, Any]) -> bool:
         return typer.confirm(f"[{', '.join(matched)}] run rule '{rule['id']}'?", default=True)
@@ -585,10 +585,14 @@ def run(
         # end, if all are ticked). Falls back to portal `activeIndex` only if the
         # checkboxes aren't in the snapshot (pod not yet rendered).
         payload = observe()
+        checks = _step_checks(payload.get("elements") or [])
         active_index = _active_index_from_checkboxes(payload.get("elements") or [])
         if active_index is None:
             active_index = _portal_active_index(cur) or 0
-        return {"active_index": active_index, "steps": steps}
+        # The orders that actually render a checkbox — the pod-gated steps. Orders
+        # absent from this set are informational (e.g. "Inspect the URL"): the mission
+        # loop skips them rather than waiting for a box that never appears.
+        return {"active_index": active_index, "steps": steps, "checkable": set(checks)}
 
     def verify_step(order: int | None, timeout: float = 20.0, interval: float = 2.0) -> bool:
         """A step is done when its checklist checkbox ticks — the synchronous signal
@@ -751,13 +755,20 @@ def _step_checks(elements: list[dict[str, Any]]) -> dict[int, bool]:
 
 
 def _active_index_from_checkboxes(elements: list[dict[str, Any]]) -> int | None:
-    """The current step = the first unticked checkbox (all ticked → past the end).
-    None when no checkboxes are captured, so the caller can fall back."""
+    """The current step = the first unticked checkbox among the ones that EXIST
+    (all ticked → past the end). None when no checkboxes are captured, so the caller
+    can fall back.
+
+    We iterate only the orders that actually render a box, so a missing order — an
+    informational step like "Inspect the URL" that has no checkbox — is not mistaken
+    for "the step we're on". Otherwise the entry point would land on that gap and the
+    loop would re-drive an already-completed later step (e.g. re-sending a reminder).
+    """
     checks = _step_checks(elements)
     if not checks:
         return None
-    for i in range(max(checks) + 1):
-        if not checks.get(i, False):
+    for i in sorted(checks):
+        if not checks[i]:
             return i
     return max(checks) + 1
 
