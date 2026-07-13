@@ -53,10 +53,41 @@ Each step also carries a `pid`; the mission carries a `flag`
 (`flag_233161…`) and the pod image ref. So we **don't** have to scrape the
 instructions pane out of nested iframes — the steps are structured JSON.
 
+## Reading the playbook deterministically (frame-scoped fetch)
+
+The playbook is `GET {experiential-origin}/api/missions/{alias}`, but reaching it
+naively hits four walls, all confirmed live:
+
+- **CORS.** A fetch from the portal origin to `experiential-mission.…` is
+  cross-subdomain → `status: 0`, blocked.
+- **Ring-buffer eviction.** The mission's load flood (RUM/ping/heartbeat) pushes
+  `/api/missions` out of the 500-event buffer before you can peek it.
+- **Body truncation.** Even when buffered, the 92KB body is cut at the 64KB
+  `TS_NETWORK_MAX_BODY` cap → unterminated JSON.
+- **Pod-destroying reload.** The old `--reload` (about:blank bounce) re-fires the
+  API but re-initialises the pod, logging the app user out mid-mission.
+
+All four dissolve by firing the request **from inside the experiential player
+iframe, frame `[0,0]`** (see [[scw-mission-app-frame]] for the frame map):
+
+- It is **same-origin** to the API there (no CORS).
+- That frame's `sessionStorage['auth-token']` holds the experiential **bearer**
+  (the only JWT in that origin's storage), attached via `page_auth`.
+- Both the **origin and the alias** are read from the frame's own
+  `location.href` (`/missions/{…}/{alias}` → e.g. `vb-63`), so nothing is
+  hardcoded.
+
+Concretely: `trainee-sim fetch {origin}/api/missions/{alias} --frame 0/0
+--page-auth`. The CLI's `_fetch_mission_def()` derives the endpoint from frame
+`[0,0]` and does exactly this; `trainee-sim mission` and the runner's playbook
+read both use it (buffer scrape kept only as a fallback). Result live: `200`, the
+full 92KB body, 7 steps, no pod reload.
+
 ## How the engine should do a mission
 
 1. Read the playbook: `instruction[]` from experiential `/api/missions/{alias}`
-   → the ordered steps and their copy-paste values.
+   → the ordered steps and their copy-paste values. Fetch it directly from frame
+   `[0,0]` as above — deterministic, no buffer/reload dependence.
 2. Read current progress **straight from the snapshot**: the side checklist
    renders each step as a hidden `<input type=checkbox>` in frame `[0,0]`, and
    `observe` now captures these with `checked` + a `label` (e.g. `"2. Log out"`).
@@ -89,6 +120,6 @@ responses. Telemetry must be on. See `trainee_sim/cli.py`.
   / hover), so a driven click needs the DOM-level fallback — and that fallback
   click *did* register with the pod (the app returned to its login form). Whether
   the pod also credits actions in a fully headless/unrendered DOM is still open.
-- The experiential bearer token: minted by `/api/session/login` from the portal
-  session — worth capturing its exchange to fetch `/api/missions` without a
-  page reload.
+- ~~The experiential bearer token~~ *(resolved)*: it lives in the player iframe's
+  `sessionStorage['auth-token']` (frame `[0,0]`). Firing the fetch from that frame
+  with `page_auth` reuses it in-browser — no need to replay `/api/session/login`.
