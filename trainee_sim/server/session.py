@@ -642,8 +642,8 @@ class BrowserSession:
 
         if selector is None:
             raise ValueError(f"{action} requires a selector")
-        if action not in ("click", "type"):
-            raise ValueError(f"Unknown action: {action!r} (use click, type, or navigate)")
+        if action not in ("click", "type", "paste"):
+            raise ValueError(f"Unknown action: {action!r} (use click, type, paste, or navigate)")
         locator = {"css": By.CSS_SELECTOR, "xpath": By.XPATH}.get(by)
         if locator is None:
             raise ValueError(f"unknown selector type {by!r} (use css or xpath)")
@@ -671,6 +671,14 @@ class BrowserSession:
                     # app's own handlers respond to that just the same.
                     driver.execute_script("arguments[0].click();", el)
                     js_click = True
+            elif action == "paste":
+                # Replace the focused editor/field's content with `value` via the OS
+                # clipboard. This is the only reliable way to put multi-line code into
+                # a cross-origin code-server (Monaco) editor: synthetic (untrusted)
+                # keyboard/paste events are ignored, and typing code char-by-char
+                # fights Monaco's auto-indent / auto-closing brackets. A real clipboard
+                # paste, by contrast, is inserted verbatim. See _paste_sync.
+                self._paste_sync(driver, el, value or "")
             else:  # type
                 el.clear()
                 el.send_keys(value or "")
@@ -690,6 +698,51 @@ class BrowserSession:
             raise ActionFailed(self._describe_action_error(exc, action, by, selector, frame))
         finally:
             driver.switch_to.default_content()
+
+    @staticmethod
+    def _paste_sync(driver: WebDriver, el: Any, text: str) -> None:
+        """Put `text` on the OS clipboard, focus `el`, select-all, and paste.
+
+        The modifier key is chosen by the *browser host's* platform, because that's
+        what the in-browser editor's keybindings follow: VS Code web binds select-all
+        to Cmd+A on macOS (Ctrl+A there is "cursor to line start"), Ctrl+A elsewhere.
+        We drive the chords with ActionChains (key_down/up) so they're trusted OS-level
+        input — the whole point, since Monaco ignores untrusted synthetic events.
+
+        The clipboard is set with `document.execCommand('copy')` off a throwaway
+        <textarea>: it needs no extra dependency and no `navigator.clipboard`
+        permission (which a cross-origin iframe is usually denied), only a focused
+        document — which a headed browser has. `el` is typically the `.monaco-editor`
+        / `.view-lines` container; clicking it moves focus into the editor so the
+        paste lands there.
+        """
+        import sys
+
+        from selenium.webdriver.common.action_chains import ActionChains
+        from selenium.webdriver.common.keys import Keys
+
+        copied = driver.execute_script(
+            """
+            const t = document.createElement('textarea');
+            t.style.position = 'fixed'; t.style.top = '0'; t.style.opacity = '0';
+            t.value = arguments[0];
+            document.body.appendChild(t);
+            t.focus(); t.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+            t.remove();
+            return ok;
+            """,
+            text,
+        )
+        if not copied:
+            raise ActionFailed("paste: could not write the text to the clipboard (execCommand copy failed)")
+        el.click()  # move focus into the editor (the clipboard write stole it)
+        mod = Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL
+        ac = ActionChains(driver)
+        ac.key_down(mod).send_keys("a").key_up(mod)  # select all → replace on paste
+        ac.key_down(mod).send_keys("v").key_up(mod)
+        ac.perform()
 
     @staticmethod
     def _describe_action_error(exc: Exception, action: str, by: str, selector: str | None, frame: list[Any]) -> str:

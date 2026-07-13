@@ -205,6 +205,10 @@ Actions share: `--window`, `--frame`, `--by css\|xpath`, `--settle`,
 - `login.nu` — worked example: scripted login to the Secure Code Warrior course.
 - `docs/` — design docs: `network-capture-design.md` (shipped) and
   `rule-runner-design.md` (the next build — read before starting the engine).
+  Three TODO docs scope the work after that: `reachability-design.md` (prove no
+  dead ends — the original mission), `websocket-settling-design.md` (verify a
+  step took effect through the Phoenix/Socket.IO channels) and
+  `mbt-model-format-design.md` (export the state graph in a standard MBT shape).
 
 ## Status
 

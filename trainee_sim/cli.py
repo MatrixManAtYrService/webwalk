@@ -389,6 +389,58 @@ def type(  # noqa: A001 — the CLI verb really is "type"
 
 
 @app.command()
+def paste(
+    into: Annotated[str, typer.Option("--into", help="Selector to paste into (e.g. '.monaco-editor' for a code editor)")] = "",  # noqa: E501
+    file: Annotated[str, typer.Option(help="Read the text to paste from this file (for multi-line code)")] = "",
+    value: Annotated[str, typer.Option(help="Literal text to paste (use --file for multi-line code)")] = "",
+    by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
+    label: Annotated[str, typer.Option(help="Short label for this step")] = "",
+    window: Annotated[str, typer.Option(help="Switch to this window first")] = "",
+    frame: Annotated[str, typer.Option(help="Paste into an element inside a (nested) iframe, e.g. '0/0/0'")] = "",
+    settle: Annotated[float, typer.Option(help="Seconds to wait before the after-snapshot (let the editor settle)")] = 0.0,  # noqa: E501
+    save: Annotated[bool, typer.Option(help="Save the capture to ./data/ even when telemetry is off")] = False,
+) -> None:
+    """Replace a focused field/editor's content via a real clipboard paste.
+
+    The reliable way to put multi-line code into a cross-origin code-server
+    (Monaco/VS Code web) editor: synthetic key/paste events are ignored, and
+    typing code char-by-char fights auto-indent. This sets the OS clipboard,
+    focuses the target, selects-all, and pastes — so the text lands verbatim.
+
+    \b
+    Examples:
+        trainee-sim paste --into ".monaco-editor" --frame 0/0/0 --file solution.py
+        trainee-sim paste --into "textarea#notes" --value "hello"
+    """
+    if not into:
+        typer.echo("Which element? Pass --into with a selector.", err=True)
+        raise typer.Exit(1)
+    if file:
+        path = Path(file)
+        if not path.exists():
+            typer.echo(f"Paste file not found: {path}", err=True)
+            raise typer.Exit(1)
+        value = path.read_text()
+    elif not value:
+        typer.echo("Nothing to paste. Pass --file or --value.", err=True)
+        raise typer.Exit(1)
+    _request_capturing(
+        "/step",
+        save=save,
+        json={
+            "action": "paste",
+            "selector": into,
+            "value": value,
+            "by": by,
+            "label": label or "paste",
+            "window": window or None,
+            "frame": frame or None,
+            "settle": settle,
+        },
+    )
+
+
+@app.command()
 def click(
     element: Annotated[str, typer.Option("--element", help="Selector of the element to click")] = "",
     by: Annotated[str, typer.Option(help="Selector type: css or xpath")] = "css",
