@@ -167,7 +167,7 @@ rules:
     do:
       ui: { action: click, frame: [0], by: xpath,
             selector: "//button[normalize-space(.)='Continue']", settle: 4 }
-    expect: [scw-challenge, scw-course-task, scw-course-breakdown, scw-mission]
+    expect: [scw-challenge, scw-course-task, scw-course-breakdown, scw-mission, scw-coding-lab]
 
   # Resume the training from the course-breakdown page. The button has no id, so
   # target it by text — case-insensitively, because XPath matches the raw DOM text
@@ -181,10 +181,11 @@ rules:
         by: xpath
         selector: '//button[contains(translate(normalize-space(.), "RESUME", "resume"), "resume")]'
         settle: 3          # SPA needs a moment to load the resumed activity
-    # Resume lands on whichever activity is current — a course-task, a mission, OR a
-    # challenge. `expect` accepts any, so the step verifies against reality rather
-    # than assuming one shape (observed live: Resume → a mission, and → a challenge).
-    expect: [scw-course-task, scw-mission, scw-challenge]
+    # Resume lands on whichever activity is current — a course-task, a mission, a
+    # challenge, OR a coding lab. `expect` accepts any, so the step verifies against
+    # reality rather than assuming one shape (observed live: Resume → a mission, → a
+    # challenge, and → a coding lab).
+    expect: [scw-course-task, scw-mission, scw-challenge, scw-coding-lab]
 
   # Advance past a VIDEO via the API instead of watching it. The gate is a POST to
   # the task attempt's /answer endpoint; auth is the X-Session-ID header (value =
@@ -217,10 +218,10 @@ rules:
       - ui: { action: click, frame: [0], by: xpath, selector: "//a[contains(normalize-space(.),'Back to course')]", settle: 2 }
       - ui: { action: click, frame: [0], by: xpath, selector: '//button[contains(translate(normalize-space(.),"RESUME","resume"),"resume")]', settle: 3 }
     # Ends on the same Resume as resume-course, so it lands on whatever activity is
-    # now current — the next task, a mission, or a challenge. Confirmed live: a
-    # video-advance landed on the course's second mission. Accept any of them so
-    # the walk keeps going instead of flagging `unexpected`.
-    expect: [scw-course-task, scw-mission, scw-challenge]
+    # now current — the next task, a mission, a challenge, or a coding lab. Confirmed
+    # live: a video-advance landed on the course's second mission. Accept any of them
+    # so the walk keeps going instead of flagging `unexpected`.
+    expect: [scw-course-task, scw-mission, scw-challenge, scw-coding-lab]
 
   # Advance off a COMPLETED mission via the results-panel "Continue" button. Listed
   # BEFORE do-mission so that when a finished mission matches both scw-mission and
@@ -232,7 +233,7 @@ rules:
     do:
       ui: { action: click, frame: [0, 0], by: xpath,
             selector: "//button[normalize-space(.)='Continue']", settle: 4 }
-    expect: [scw-challenge, scw-course-task, scw-course-breakdown]
+    expect: [scw-challenge, scw-course-task, scw-course-breakdown, scw-coding-lab]
 
   # Advance off a COMPLETED coding lab via its "Next Activity" button (frame [0,0]).
   # Confirmed live 2026-07-13: Next Activity here landed on the course's next activity

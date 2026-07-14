@@ -308,6 +308,174 @@ challenges:
     answer:
       select: 1
 
+  # Broken Authentication — "Insufficiently Protected Credentials", Python, auth.py.
+  # LOCATE stage: 4 highlighted blocks across auth.py + users.py. The vuln is the
+  # password-hashing algorithm choice —
+  #   auth.py:20  self.hasher = hashlib.sha1        # load password hasher
+  # — SHA-1 is a fast, unsalted general-purpose hash, unfit for password storage: a
+  # leaked hash is trivially brute-forced / rainbow-tabled (it must be a slow, salted
+  # KDF like Argon2/bcrypt/PBKDF2). This mirrors `weak-hash-algorithm-locate`, whose
+  # answer is likewise the algorithm-CHOICE line, not its usage. The others are safe:
+  # auth.py:35-36 merely USES the hasher (encode + constant-ish compare), and the
+  # users.py blocks (49, 59-62) are distractors from the other file. Solved live
+  # 2026-07-14. The full candidate set fingerprints THIS challenge so the key can't
+  # fire on another auth task sharing the category.
+  - id: insufficiently-protected-credentials-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Insufficiently Protected Credentials"
+      options_include: ["auth.py:20-20", "auth.py:35-36", "users.py:49-49", "users.py:59-62"]
+    answer:
+      select: "auth.py:20-20"
+
+  # Insecure Cryptography — "Exposed Key", Python, config.py. LOCATE stage: 4 highlighted
+  # blocks across config.py + crypto.py. The vuln is a HARDCODED symmetric key —
+  #   config.py:34  SECRET_KEY = 'pBjeMj200AQ02hDGWwrByY0XDLHEr7XO5Y7q_1S8h3U='
+  # — a base64 Fernet-style encryption/decryption key committed straight into source, so
+  # anyone with the repo can decrypt everything it protects; it must come from the
+  # environment/a secrets store, not a literal. Every other candidate already does the safe
+  # thing: config.py:39-41 is `PRIVATE_KEY/PUBLIC_KEY = os.environ.get(...)`, and the
+  # crypto.py blocks (13, 57) are code that USES keys, not a hardcoded secret. Solved live
+  # 2026-07-14. Full candidate set fingerprints THIS challenge so the key can't fire on
+  # another crypto task sharing the category.
+  - id: exposed-key-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Exposed Key"
+      options_include: ["config.py:34-34", "config.py:39-41", "crypto.py:13-13", "crypto.py:57-57"]
+    answer:
+      select: "config.py:34-34"
+
+  # Insufficient Transport Layer Protection — "Unprotected Transport of Credentials",
+  # Python, auth.py. LOCATE stage: 4 highlighted blocks across auth.py + config.py. The
+  # vuln is the TLS context being built on a broken protocol version —
+  #   auth.py:92  context = ssl.SSLContext(ssl.PROTOCOL_SSLv2)  # SSL version 2.0
+  # — SSLv2 is catastrophically weak (disabled everywhere for decades), so credentials sent
+  # over it are effectively unprotected in transit; it must use PROTOCOL_TLS / a modern TLS
+  # version. The others are safe: auth.py:94-97 DISABLES the old protocols (OP_NO_SSLv3 /
+  # TLSv1 / TLSv1.1 — hardening), and config.py:19-23 (DB ssl ca/cert/key) + config.py:34-38
+  # (CERT_CA_FILE/KEY) just load paths from the environment. Solved live 2026-07-14. Full
+  # candidate set fingerprints THIS challenge.
+  - id: unprotected-transport-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Unprotected Transport of Credentials"
+      options_include: ["auth.py:92-92", "auth.py:94-97", "config.py:19-23", "config.py:34-38"]
+    answer:
+      select: "auth.py:92-92"
+
+  # Information Exposure — "Sensitive Data Exposure", Python, connect.py. LOCATE stage: 4
+  # highlighted blocks across connect.py + config.py. The vuln is an error log that dumps the
+  # entire DB config —
+  #   connect.py:15-17  logger.error('Database connection error: %s.'
+  #                                  ' Connection: %s' % (e, DATABASE))
+  # — `DATABASE` holds the db user, passwd, and ssl key paths, so on any connection failure the
+  # credentials are written straight into the logs (sensitive data exposure). The others are
+  # safe: connect.py:13 is a normal `MySQLdb.connect(**DATABASE)`, and config.py:11-23 (the
+  # DATABASE dict) + config.py:39-41 (PRIVATE_KEY/PUBLIC_KEY) just read values from the
+  # environment. Solved live 2026-07-14. Full candidate set fingerprints THIS challenge.
+  - id: sensitive-data-exposure-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Sensitive Data Exposure"
+      options_include: ["connect.py:13-13", "connect.py:15-17", "config.py:11-23", "config.py:39-41"]
+    answer:
+      select: "connect.py:15-17"
+
+  # Same sensitive-data-exposure challenge, FIX stage. 4 candidate solutions; solution 3 is
+  # correct — it fixes ONLY the leaky log and touches nothing else: connect.py becomes
+  #   except MySQLdb.MySQLError as e:
+  #       logger.error('Database connection error: %s' % e)
+  # (drops the `DATABASE` interpolation so creds no longer hit the log), and config.py is left
+  # loading everything from os.environ.get(...). The distractors are a MULTI-FILE compare-all
+  # trap (see the challenge-fix-compare-all memory) — you MUST read config.py too, not just the
+  # open connect.py tab:
+  #   sol 1  has the SAME clean connect.py log fix, BUT in config.py hardcodes the DB creds
+  #          ('db'/'user'/'passwd' = literal secrets) — trades the log leak for hardcoded
+  #          credentials. Reading only connect.py makes 1 look identical to 3; config.py is the tell.
+  #   sol 2  only narrows the except to OperationalError and KEEPS the `% (e, DATABASE)` log — still leaks.
+  #   sol 4  hardcodes the creds directly in the connect.py `MySQLdb.connect(db=…, passwd=…)` call.
+  # Solved + validated live 2026-07-14 (→ "Bingo!"). This one is why the "pick the lower of two
+  # scrape-identical goods" heuristic is UNSAFE: 1 and 3 share connect.py but diverge in config.py.
+  # NOTE: `select` is the on-screen NUMBER; if SCW shuffles order, content-match BOTH panes (right
+  # connect.py logs only `e`, AND config.py still reads creds from os.environ).
+  - id: sensitive-data-exposure-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Sensitive Data Exposure"
+      file: "connect.py"
+    answer:
+      select: 3
+
+  # Same unprotected-transport challenge, FIX stage. 4 candidate solutions, all editing the
+  # run_https() TLS setup; solution 3 is correct — it changes ONLY the broken protocol line to
+  #   context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+  # while keeping https_port=443, the OP_NO_SSLv3/TLSv1/TLSv1.1 hardening, load_cert_chain, AND
+  # crucially the socket wrap `httpd.socket = context.wrap_socket(httpd.socket, server_side=True)`.
+  # The distractors (a textbook compare-ALL-lines trap — see the challenge-fix-compare-all memory):
+  #   sol 1  uses PROTOCOL_SSLv3 — still a broken protocol (POODLE), just SSLv2→SSLv3.
+  #   sol 2  uses PROTOCOL_TLS_SERVER (looks right at line 92!) BUT silently DROPS the
+  #          `context.wrap_socket(...)` line and switches to http_port=8080 — so the TLS context
+  #          is built and never applied; the server serves cleartext. Reading only line 92 picks
+  #          this; reading the whole diff (the missing wrap_socket) rejects it.
+  #   sol 4  removes SSL entirely and serves plain HTTP on port 80.
+  # Solved + validated live 2026-07-14 (→ "Success"). NOTE: `select` is the on-screen NUMBER; if
+  # SCW shuffles order, content-match the right pane (PROTOCOL_TLS_SERVER + wrap_socket present +
+  # https_port=443).
+  - id: unprotected-transport-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Unprotected Transport of Credentials"
+      file: "auth.py"
+    answer:
+      select: 3
+
+  # Same exposed-key challenge, FIX stage. 4 candidate solutions, all rewriting config.py
+  # line 34 (the hardcoded SECRET_KEY); solution 1 is correct — it reads the key from the
+  # environment: `SECRET_KEY = os.environ.get('SECRET_KEY')` (out of source entirely). The
+  # distractor is sol 2 — `SECRET_KEY = 'cEJqZU1q…'`, the SAME key merely base64-encoded and
+  # STILL hardcoded (obfuscation isn't protection; it decodes right back to the original).
+  #
+  # SHARP TRAP: solutions 1, 3, and 4 render BYTE-IDENTICAL (md5-equal) in config.py — the
+  # only file — each just `os.environ.get('SECRET_KEY')`. Their difference lives in hidden
+  # test config, unreadable from the editor, so content-matching CANNOT disambiguate the
+  # three; the `select: 1` NUMBER is load-bearing and unrecoverable if SCW shuffles order.
+  # SCW confirms exactly one is correct ("only one solution is correct"); live submit of 1
+  # → Success. Solved + validated live 2026-07-14.
+  - id: exposed-key-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Exposed Key"
+      file: "config.py"
+    answer:
+      select: 1
+
+  # Same insufficiently-protected-credentials challenge, FIX stage (reached after the
+  # locate success overlay's Continue). 4 candidate solutions; solution 2 is correct —
+  # it swaps SHA-1 for a config-driven, salted password hasher: auth.py loads the class
+  # named by `PASSWORD_HASHER` (from config) out of the `hashers` module —
+  #   self.hasher = getattr(importlib.import_module('hashers'), PASSWORD_HASHER)()
+  # — verifies with `self.hasher.verify(password, result[1])`, and users.py stores with a
+  # per-record salt: `self.hasher.encode(password, self.hasher.salt())`. The distractors:
+  # sol 1 uses `hashlib.new('md4')` and sol 4 uses `hashlib.md5` — both fast, unsalted,
+  # cryptographically broken hashes (no better than the SHA-1 they replace). Solved +
+  # validated live 2026-07-14 (→ "Success").
+  #
+  # SHARP TRAP: solutions 2 and 3 render BYTE-IDENTICAL in BOTH editable files (auth.py
+  # AND users.py — md5sum-equal in the scrape). Their only difference lives in the
+  # NON-rendered hashers/config module (the strength of the hasher class each points
+  # PASSWORD_HASHER at), which the editor never shows. So content-matching CANNOT
+  # disambiguate them — the `select: 2` NUMBER is load-bearing and unrecoverable by
+  # reading if SCW ever shuffles solution order. SCW's own copy confirms exactly one is
+  # correct ("only one solution is correct"); live submit of 2 → Success, so 2 it is.
+  - id: insufficiently-protected-credentials-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Insufficiently Protected Credentials"
+      file: "auth.py"
+    answer:
+      select: 2
+
   # Insufficient Logging and Monitoring — Python, __init__.py + logging_config.py. LOCATE
   # stage: 4 highlighted blocks. The vuln is the console log handler —
   #   logging_config.py:22-28  'console': {'class': 'logging.StreamHandler',

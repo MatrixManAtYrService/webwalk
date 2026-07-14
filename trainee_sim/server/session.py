@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -46,6 +47,36 @@ class ActionFailed(RuntimeError):
     Carries a readable reason so the caller gets a 4xx with a message instead of
     an opaque 500 when a selector is wrong or the element isn't interactable.
     """
+
+
+_RETURN_RE = re.compile(r"\breturn\b")
+
+# Chrome/chromedriver parse-error signatures. These surface only at parse time
+# (before any statement runs), which is what makes the eval fallback safe.
+_SYNTAX_ERROR_MARKERS = (
+    "unexpected token",
+    "unexpected identifier",
+    "unexpected string",
+    "unexpected number",
+    "unexpected end of input",
+    "invalid or unexpected token",
+    "missing ) after",
+)
+
+
+def _has_toplevel_return(script: str) -> bool:
+    """Cheap check for whether `script` already looks like a function body.
+
+    Only a fast path — a wrong answer is harmless: a false negative just costs
+    an extra probe round trip, a false positive returns undefined instead of a
+    value (the same result the caller would get running the raw script anyway).
+    """
+    return bool(_RETURN_RE.search(script))
+
+
+def _is_syntax_error(exc: Exception) -> bool:
+    msg = str(getattr(exc, "msg", None) or exc).lower()
+    return any(marker in msg for marker in _SYNTAX_ERROR_MARKERS)
 
 
 class BrowserSession:
@@ -991,12 +1022,31 @@ class BrowserSession:
         # Descend into the target frame (if any) so the script runs in its
         # document, then always return to top. Without a frame this is the top
         # document (the SPA origin).
+        from selenium.common.exceptions import JavascriptException
+
         self._enter_frame_path(driver, frame)
         try:
-            # execute_script only returns a value if the body uses `return`; wrap a
-            # bare expression so callers can pass either.
-            body = script if "return" in script else f"return ({script});"
-            return driver.execute_script(body, *args)
+            # execute_script only returns a value when the body uses `return`, so a
+            # caller passing a bare expression (`document.title`) gets nothing back
+            # unless we wrap it as `return (...)`. But wrapping is only valid for an
+            # expression: statements without a return (`var x = ...; foo(x)`) become
+            # `return (var x = ...)` — a parse error ("Unexpected token 'var'").
+            #
+            # We can't reliably tell the two apart by inspection (an expression may
+            # contain the substring "return", statements may omit it), so probe:
+            # try the expression wrap first, and if that fails to *parse*, run the
+            # script raw. Syntax errors are raised at parse time, before any code
+            # runs, so the fallback re-run causes no double side effects. A body
+            # with an explicit top-level `return` skips the probe — it's already in
+            # the form execute_script wants, and probing would waste a round trip.
+            if _has_toplevel_return(script):
+                return driver.execute_script(script, *args)
+            try:
+                return driver.execute_script(f"return ({script});", *args)
+            except JavascriptException as exc:
+                if not _is_syntax_error(exc):
+                    raise
+                return driver.execute_script(script, *args)
         finally:
             driver.switch_to.default_content()
 
