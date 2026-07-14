@@ -250,13 +250,22 @@ def observe(
     label: Annotated[str, typer.Option(help="Short label for this step's capture file")] = "observe",
     window: Annotated[str, typer.Option(help="Switch to this window first (index/'latest'/url substring)")] = "",
     save: Annotated[bool, typer.Option(help="Save the full capture to ./data/ even when telemetry is off")] = False,
+    brief: Annotated[bool, typer.Option("--brief", help="Print a compact text digest (actionable elements, traffic) instead of JSON")] = False,  # noqa: E501
 ) -> None:
     """Capture the current browser state; a compact summary prints to stdout.
 
     The full page state (elements, DOM, open windows) is written to
     ./data/captures/ when telemetry is on, or when you pass --save (for
-    inspection during a telemetry-off login flow).
+    inspection during a telemetry-off login flow). `--brief` prints the
+    interactive elements and traffic as text so there's no JSON to post-process.
     """
+    if brief:
+        result = _call("/observe", json={"label": label, "window": window or None})
+        record = result.pop("record", None)
+        if record is not None and (save or result.get("recorded")):
+            result["local_path"] = _save_capture(record)
+        typer.echo(_brief_observe((record or {}).get("state") or {}, result))
+        return
     _request_capturing("/observe", save=save, json={"label": label, "window": window or None})
 
 
@@ -531,15 +540,154 @@ def _frame_to_str(frame: Any) -> str | None:
     return str(frame)
 
 
+# --- compact (--brief) rendering ------------------------------------------------
+#
+# `run` returns a verbose nested JSON. When an agent drives the walk it doesn't
+# want the whole tree — it wants the same handful of lines it would otherwise
+# reconstruct with an inline `python3 -c` (status, rule, history, and the
+# stuck-context: what's actionable, what traffic fired, which states were near).
+# Rendering that here means one stable, allowlist-friendly command with no
+# post-processing pipe. Everything below is presentation-only.
+
+
+def _brief_actionable(items: list[dict[str, Any]], limit: int = 12) -> list[str]:
+    """One line per interactive element: tag, id/name, text, frame, disabled."""
+    lines: list[str] = []
+    for el in items[:limit]:
+        tag = el.get("tag") or "?"
+        ident = f"#{el['id']}" if el.get("id") else (f"[{el['name']}]" if el.get("name") else "")
+        label = el.get("text") or el.get("aria_label") or ""
+        label = f' "{label[:40]}"' if label else ""
+        frame = el.get("frame")
+        frame_s = f" frame={frame}" if frame else ""
+        flags = "" if el.get("enabled", True) else " DISABLED"
+        lines.append(f"{tag}{ident}{label}{frame_s}{flags}")
+    if len(items) > limit:
+        lines.append(f"… +{len(items) - limit} more")
+    return lines
+
+
+def _brief_network(items: list[dict[str, Any]], limit: int = 8) -> list[str]:
+    """One line per captured request/ws frame (method, status, url)."""
+    lines: list[str] = []
+    for e in items[:limit]:
+        if e.get("type") == "ws":
+            lines.append(f"ws {e.get('direction', ''):8} op={e.get('opcode')}")
+        else:
+            lines.append(f"{str(e.get('method') or ''):4} {str(e.get('status') or '···'):>3} {str(e.get('url') or '')[:100]}")  # noqa: E501
+    if len(items) > limit:
+        lines.append(f"… +{len(items) - limit} more")
+    return lines
+
+
+def _brief_context(ctx: dict[str, Any]) -> list[str]:
+    """Render a stuck-context block (generic, mission, challenge, or coding-lab)."""
+    lines: list[str] = []
+    for k in ("url", "title", "stage", "file", "vulnerability", "decision", "active_step"):
+        if ctx.get(k) is not None:
+            lines.append(f"  {k}: {ctx[k]}")
+    if ctx.get("step"):
+        step = ctx["step"]
+        lines.append(f"  step: {step.get('order')} {step.get('title')!r} — {step.get('description', '')[:80]}")
+    if ctx.get("options"):
+        lines.append(f"  options: {[o.get('id') for o in ctx['options']]}")
+    if ctx.get("steps_text"):
+        lines.append(f"  steps_text: {ctx['steps_text'][:160]}…")
+    if ctx.get("actionable"):
+        lines.append(f"  actionable ({len(ctx['actionable'])}):")
+        lines += [f"    {r}" for r in _brief_actionable(ctx["actionable"])]
+    if ctx.get("network"):
+        lines.append(f"  network ({len(ctx['network'])}):")
+        lines += [f"    {r}" for r in _brief_network(ctx["network"])]
+    if ctx.get("near_states"):
+        lines.append(f"  near: {[(n.get('id'), n.get('signals')) for n in ctx['near_states']]}")
+    return lines
+
+
+def _brief_history(history: list[dict[str, Any]]) -> list[str]:
+    """One line per walk step: `rule from [states] -> landed/sub-status extra`."""
+    lines: list[str] = []
+    for h in history:
+        sub = next((h[k] for k in ("mission", "challenge", "coding_lab") if k in h), None)
+        if sub is not None:
+            landed = sub.get("status")
+            extra = " ".join(
+                f"{k}={sub[k]}"
+                for k in ("stage", "id", "active_index", "active_step", "handler")
+                if sub.get(k) is not None
+            )
+            lines.append(f"  {h.get('rule')} from {h.get('from')} -> {landed} {extra}".rstrip())
+        else:
+            lines.append(f"  {h.get('rule')} from {h.get('from')} -> {h.get('landed')}")
+    return lines
+
+
+def _brief_observe(state: dict[str, Any], meta: dict[str, Any]) -> str:
+    """A compact digest of an observe capture — the interactive elements (with
+    selectors), the traffic, any challenge/other-tabs — so the agent needn't open
+    the saved JSON to see what's on the page."""
+    from trainee_sim.engine.runner import actionable_elements, summarize_network
+
+    lines: list[str] = []
+    if meta.get("local_path"):
+        lines.append(f"saved: {meta['local_path']}")
+    lines.append(f"url: {state.get('url')}")
+    if state.get("title"):
+        lines.append(f"title: {state['title']}")
+    acts = actionable_elements(state)
+    lines.append(f"elements: {len(state.get('elements') or [])} (actionable {len(acts)})")
+    lines += [f"  {r}" for r in _brief_actionable(acts)]
+    net = summarize_network(state)
+    if net:
+        lines.append(f"network ({len(net)}):")
+        lines += [f"  {r}" for r in _brief_network(net)]
+    challenge = state.get("challenge")
+    if challenge and challenge.get("stage") not in (None, "none"):
+        lines.append(f"challenge: stage={challenge.get('stage')} {challenge.get('vulnerability') or ''}".rstrip())
+    others = [w for w in (state.get("windows") or []) if not w.get("active")]
+    if others:
+        lines.append(f"other tabs ({len(others)}):")
+        lines += [f"  [{w.get('index')}] {w.get('url')}" for w in others]
+    return "\n".join(lines)
+
+
+def _brief_run(result: dict[str, Any]) -> str:
+    """A compact text digest of a `run` result — the shape an agent actually reads."""
+    lines = [f"status: {result.get('status')}"]
+    for k in ("rule", "state", "matched", "expected", "landed", "url"):
+        if result.get(k):
+            lines.append(f"{k}: {result[k]}")
+    for key in ("mission", "challenge", "coding_lab"):
+        sub = result.get(key)
+        if sub:
+            detail = " ".join(
+                f"{k}={sub[k]}"
+                for k in ("id", "stage", "active_index", "active_step", "handler")
+                if sub.get(k) is not None
+            )
+            lines.append(f"{key}: {sub.get('status')} {detail}".rstrip())
+    history = result.get("history") or []
+    if history:
+        lines.append(f"history ({len(history)}):")
+        lines += _brief_history(history)
+    ctx = result.get("context")
+    if ctx:
+        lines.append("context:")
+        lines += _brief_context(ctx)
+    return "\n".join(lines)
+
+
 @app.command()
 def run(
     to: Annotated[str, typer.Option(help="Walk until we reach this state id (else run until no rule applies)")] = "",
     states: Annotated[str, typer.Option(help="YAML file of state signatures + rules")] = "courses/secure-code-warrior.yaml",  # noqa: E501
     missions: Annotated[str, typer.Option(help="YAML file of reusable mission step-handlers")] = "courses/missions.yaml",  # noqa: E501
     challenges: Annotated[str, typer.Option(help="YAML file of challenge answer-key handlers")] = "courses/challenges.yaml",  # noqa: E501
+    coding_labs: Annotated[str, typer.Option(help="YAML file of coding-lab answer-key handlers")] = "courses/coding-labs.yaml",  # noqa: E501
     window: Annotated[str, typer.Option(help="Observe/act on this window (index/'latest'/url substring)")] = "",
     once: Annotated[bool, typer.Option(help="Take a single step, then stop")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't prompt before each step (autonomous)")] = False,
+    brief: Annotated[bool, typer.Option("--brief", help="Print a compact text summary instead of the full JSON")] = False,  # noqa: E501
 ) -> None:
     """Walk the course state graph: observe → match → act → verify, resumable.
 
@@ -580,6 +728,12 @@ def run(
     # a challenge task): a content-signature per solved challenge -> the option to pick.
     challenges_path = Path(challenges)
     challenge_handlers = (yaml.safe_load(challenges_path.read_text()) or {}).get("challenges", []) if challenges_path.exists() else []  # noqa: E501
+
+    # The coding-lab answer-key library (optional — used when the walker stops on a
+    # coding lab): a content-signature per solved lab -> the full file content to paste
+    # for each of its steps.
+    coding_labs_path = Path(coding_labs)
+    coding_lab_handlers = (yaml.safe_load(coding_labs_path.read_text()) or {}).get("coding_labs", []) if coding_labs_path.exists() else []  # noqa: E501
 
     def observe() -> dict[str, Any]:
         result = _call("/observe", json={"label": "run", "window": window or None})
@@ -684,10 +838,10 @@ def run(
     runner = Runner(
         state_defs, rule_defs, observe, act, confirm=confirm, http=http_fetch, eval_js=eval_js,
         api_hosts=api_hosts, read_mission=read_mission, mission_steps=mission_steps, verify_step=verify_step,
-        challenge_handlers=challenge_handlers,
+        challenge_handlers=challenge_handlers, coding_lab_handlers=coding_lab_handlers,
     )
     result = runner.run(to=to or None, max_steps=1 if once else 20, auto=yes)
-    typer.echo(json.dumps(result, indent=2, default=str))
+    typer.echo(_brief_run(result) if brief else json.dumps(result, indent=2, default=str))
     if result.get("status") in ("unknown", "ambiguous", "unexpected", "stuck"):
         raise typer.Exit(1)
 

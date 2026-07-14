@@ -257,6 +257,49 @@ class BrowserSession:
         driver.switch_to.window(original)  # restore focus; enumeration is side-effect-free
         return out
 
+    def _list_windows_light(self, driver: WebDriver) -> list[dict[str, Any]]:
+        """Enumerate windows WITHOUT changing focus (no visible tab-flip).
+
+        `_list_windows_sync` switches into every window to read its url/title,
+        which — in a headed browser — visibly raises each tab. Since the snapshot
+        runs that on *every* observe (and each action snapshots twice, and a
+        mission step re-observes up to ten times to verify), the operator sees the
+        window rapidly flip through every open tab and back on each look. That's
+        the flicker.
+
+        Chrome exposes each window handle as `CDwindow-<targetId>`, so we map
+        handles to CDP `Target.getTargets` infos for url/title instead of
+        switching into them. Focus never moves. Falls back to reading only the
+        focused window directly (still no switch) if CDP or the handle→target
+        mapping isn't available (e.g. a non-Chrome Grid) — other tabs then show a
+        null url/title, which is fine for this diagnostic-only field.
+        """
+        handles = driver.window_handles
+        try:
+            current = driver.current_window_handle
+        except Exception:
+            current = None
+        targets_by_id: dict[str, dict[str, Any]] = {}
+        try:
+            infos = driver.execute_cdp_cmd("Target.getTargets", {}).get("targetInfos", [])
+            targets_by_id = {t.get("targetId"): t for t in infos if t.get("type") == "page"}
+        except Exception:
+            targets_by_id = {}  # non-Chrome / CDP unavailable — degrade, don't switch
+        out: list[dict[str, Any]] = []
+        for i, handle in enumerate(handles):
+            info = targets_by_id.get(handle.split("CDwindow-", 1)[-1])
+            if info is not None:
+                url, title = info.get("url"), info.get("title")
+            elif handle == current:
+                try:
+                    url, title = driver.current_url, driver.title
+                except Exception:
+                    url, title = None, None
+            else:
+                url, title = None, None  # can't read without switching; leave blank
+            out.append({"index": i, "url": url, "title": title, "active": handle == current})
+        return out
+
     async def windows(self) -> dict[str, Any]:
         driver = await self._ready()
         windows = await asyncio.to_thread(self._list_windows_sync, driver)
@@ -543,8 +586,10 @@ class BrowserSession:
             "dom": driver.page_source,  # top document only (frame text is in `frames`)
             "network": self.network.drain(),  # API traffic this step produced
             # Record the whole window set with each step, so a capture shows what
-            # other tabs were open (and which one this snapshot is of).
-            "windows": self._list_windows_sync(driver),
+            # other tabs were open (and which one this snapshot is of). Uses the
+            # focus-free enumeration — switching into each tab here would flicker
+            # the headed browser on every observe (see _list_windows_light).
+            "windows": self._list_windows_light(driver),
         }
 
     async def snapshot(self) -> dict[str, Any]:

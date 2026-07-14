@@ -1,0 +1,130 @@
+# Coding-lab ANSWER KEY — the "what code to write" macros.
+#
+# A coding lab (engine/coding_lab.py) asks the trainee to WRITE code into a
+# cross-origin code-server editor, then Submit — the third SCW task type after
+# missions (courses/missions.yaml) and challenges (courses/challenges.yaml). The
+# thinking is done once, by hand; what's encoded here is only the ASSOCIATION: a
+# lab's content signature -> the full file content to paste for each step.
+#
+# Matched on the lab's own INTRODUCTION/STEPS text (NOT the task URL), so the same
+# key fires on any replay. `steps` is one entry per lab step, in order; the driver
+# pastes steps[active_step].content (active_step = how many steps are already done)
+# into the editor and clicks Submit, one step per pass. An unmatched lab stops the
+# walk with the lab as context so a new key can be added.
+
+coding_labs:
+- id: mfa-python-flashpoint
+  match:
+    text_contains: implementing the second layer in order to have multi-factor authentication
+    file: models.py
+  steps:
+  - content: |
+      from typing import List, Optional
+
+      import pyotp
+      from sqlalchemy import String
+      from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+      from db.base import Base
+      from db.enums import Language, Role
+      from utils import hash_password, verify_password
+
+
+      class User(Base):
+          __tablename__ = "users"
+          id: Mapped[int] = mapped_column(primary_key=True)
+          email: Mapped[str] = mapped_column(String(256), unique=True)
+          first_name: Mapped[Optional[str]] = mapped_column(String(256))
+          last_name: Mapped[Optional[str]] = mapped_column(String(256))
+          role: Mapped[Role] = mapped_column(default=Role.CUSTOMER)
+          language: Mapped[Language] = mapped_column(default=Language.ENGLISH)
+          photos: Mapped[List["Photo"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+          photo_books: Mapped[List["PhotoBook"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+          orders: Mapped[List["ShoppingOrder"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+          password_hash: Mapped[str] = mapped_column(String(256))
+          otp_secret: Mapped[Optional[str]] = mapped_column(String(32), unique=True)
+
+          @property
+          def is_admin(self) -> bool:
+              return self.role == Role.ADMIN
+
+          @property
+          def is_2fa_enabled(self) -> bool:
+              return False
+
+          def generate_new_otp_secret(self) -> str:
+              return pyotp.random_base32()
+
+          def get_2fa_setup_uri(self, otp_secret: str) -> str:
+              return pyotp.totp.TOTP(otp_secret).provisioning_uri(
+                  name=self.email, issuer_name="FlashPointKiosk"
+              )
+
+          def check_otp(self, otp: str) -> bool:
+              return True
+
+          def set_password(self, value: str) -> None:
+              self.password_hash = hash_password(value)
+
+          password = property(fset=set_password)
+
+          def check_password(self, value: str) -> bool:
+              return verify_password(self.password_hash, value)
+
+          def __repr__(self) -> str:
+              return f"User(id={self.id!r})"
+  - content: |
+      from typing import List, Optional
+
+      import pyotp
+      from sqlalchemy import String
+      from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+      from db.base import Base
+      from db.enums import Language, Role
+      from utils import hash_password, verify_password
+
+
+      class User(Base):
+          __tablename__ = "users"
+          id: Mapped[int] = mapped_column(primary_key=True)
+          email: Mapped[str] = mapped_column(String(256), unique=True)
+          first_name: Mapped[Optional[str]] = mapped_column(String(256))
+          last_name: Mapped[Optional[str]] = mapped_column(String(256))
+          role: Mapped[Role] = mapped_column(default=Role.CUSTOMER)
+          language: Mapped[Language] = mapped_column(default=Language.ENGLISH)
+          photos: Mapped[List["Photo"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+          photo_books: Mapped[List["PhotoBook"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+          orders: Mapped[List["ShoppingOrder"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+          password_hash: Mapped[str] = mapped_column(String(256))
+          otp_secret: Mapped[Optional[str]] = mapped_column(String(32), unique=True)
+
+          @property
+          def is_admin(self) -> bool:
+              return self.role == Role.ADMIN
+
+          @property
+          def is_2fa_enabled(self) -> bool:
+              return self.otp_secret is not None
+
+          def generate_new_otp_secret(self) -> str:
+              return pyotp.random_base32()
+
+          def get_2fa_setup_uri(self, otp_secret: str) -> str:
+              return pyotp.totp.TOTP(otp_secret).provisioning_uri(
+                  name=self.email, issuer_name="FlashPointKiosk"
+              )
+
+          def check_otp(self, otp: str) -> bool:
+              return pyotp.TOTP(self.otp_secret).verify(otp)
+
+          def set_password(self, value: str) -> None:
+              self.password_hash = hash_password(value)
+
+          password = property(fset=set_password)
+
+          def check_password(self, value: str) -> bool:
+              return verify_password(self.password_hash, value)
+
+          def __repr__(self) -> str:
+              return f"User(id={self.id!r})"

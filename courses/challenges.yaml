@@ -51,3 +51,179 @@ challenges:
       file: "auth.py"
     answer:
       select: 3
+
+  # Access Control — "Insecure Direct Object Reference" (IDOR), Python. LOCATE stage:
+  # 4 highlighted blocks across auth.py + users.py. The vuln is that
+  #   auth.py:70-93  def roles(self, user_id=None): … WHERE user_roles.user_id = %(user_id)s
+  # accepts a CALLER-SUPPLIED user_id and returns that user's roles with no ownership
+  # check — its `@is_authorized` only proves you're logged in, not that the id is
+  # yours — so any user can read anyone's roles by id (the direct object reference).
+  # The other blocks are safe: auth.py:24-34 is a parameterized login query (no SQLi);
+  # users.py:102-105 and 124-151 are the CORRECT guards — each calls self.roles() with
+  # no arg (→ self.id) and gates on 'administrator' in roles. Solved + validated live
+  # 2026-07-13 (select → "Bingo!" success overlay). Full candidate set fingerprints
+  # THIS challenge so the key can't fire on another IDOR task sharing the category.
+  - id: idor-roles-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Insecure Direct Object Reference"
+      options_include: ["auth.py:24-34", "auth.py:70-93", "users.py:102-105", "users.py:124-151"]
+    answer:
+      select: "auth.py:70-93"
+
+  # Insecure Cryptography — "Weak Algorithm Use", Python. LOCATE stage: 4 blocks across
+  # auth.py + config.py. The vuln is the password-hashing algorithm choice —
+  #   config.py:26  PASSWORD_HASHER = 'UnsaltedMD5PasswordHasher'
+  # — unsalted MD5 is fast and broken, so a leaked hash is trivially reversed (the very
+  # premise of the paired rainbow-table mission). The others are benign: auth.py:49 just
+  # reads the submitted password, auth.py:69-75 is a parameterized INSERT, config.py:34
+  # loads SECRET_KEY from the environment. Solved + validated live 2026-07-13 (→ "Bingo!").
+  - id: weak-hash-algorithm-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Weak Algorithm Use"
+      options_include: ["auth.py:49-49", "auth.py:69-75", "config.py:26-26", "config.py:34-34"]
+    answer:
+      select: "config.py:26-26"
+
+  # Insecure Cryptography — "Insecure Randomness", Python. LOCATE stage: 4 blocks across
+  # auth.py + clients.py. The vuln is generating a security-sensitive value with the
+  # non-cryptographic Mersenne-Twister PRNG —
+  #   auth.py:28-29  cookie['sessionid'] = ''.join(random.choice(allowed_chars) for i in range(32))
+  # — `random` is predictable, so the session id is guessable; it must be `secrets.choice`
+  # (cf. the exposed-session-tokens challenge, where the SECURE variant used secrets). The
+  # others are benign: auth.py:109-110 just invokes the reset-token generator, auth.py:138
+  # is a TLS starttls, clients.py:18-19 loads the password hasher. Solved + validated live
+  # 2026-07-13 (→ "Bingo!").
+  - id: insecure-randomness-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Insecure Randomness"
+      options_include: ["auth.py:28-29", "auth.py:109-110", "auth.py:138-138", "clients.py:18-19"]
+    answer:
+      select: "auth.py:28-29"
+
+  # Vulnerable Components — "Using Components From Untrusted Source", Python. LOCATE stage:
+  # 4 blocks across comment_xml.py + requirements.txt. The vuln is the dependency source —
+  #   requirements.txt:4  -e git+https://github.com/untrusted/defusedxml.git#egg=defusedxml
+  # — an editable install of defusedxml from an arbitrary GitHub repo (github.com/untrusted)
+  # instead of the vetted PyPI package, so whatever that repo ships runs in your app. The
+  # others are benign: requirements.txt:1 is a normal pinned `pymongo==4.12.0`, and the
+  # comment_xml.py blocks (import MongoConnection; etree.parse in a try/except) are unrelated
+  # distractors. Solved + validated live 2026-07-13 (→ "Success").
+  - id: untrusted-component-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Untrusted Source"
+      options_include: ["comment_xml.py:5-5", "comment_xml.py:25-29", "requirements.txt:1-1", "requirements.txt:4-4"]
+    answer:
+      select: "requirements.txt:4-4"
+
+  # Injection Flaws — "Deserialization of Untrusted Data", Python. LOCATE stage: 4 blocks
+  # across clients.py + vehicles.py. The vuln is deserializing with the UNSAFE YAML loader —
+  #   clients.py:157  client = yaml.load(stream, Loader=yaml.Loader)
+  # — `yaml.Loader` can construct arbitrary Python objects from the input, so untrusted YAML
+  # → RCE; it must be `yaml.safe_load` / `SafeLoader`. The others are benign/other-category:
+  # clients.py:75-79 is a parameterized SQL INSERT, clients.py:111 is etree.parse with an
+  # explicit parser, vehicles.py:35-39 is a Mongo $regex query (a NoSQLi shape, not deserialization).
+  # Solved + validated live 2026-07-13 (→ "Success").
+  - id: unsafe-deserialization-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Deserialization of Untrusted Data"
+      options_include: ["clients.py:75-79", "clients.py:111-111", "clients.py:157-157", "vehicles.py:35-39"]
+    answer:
+      select: "clients.py:157-157"
+
+  # Same deserialization challenge, FIX stage. 4 candidate solutions; solution 1 is correct —
+  #   client = yaml.safe_load(stream)
+  # which restricts construction to plain Python types (no arbitrary object instantiation).
+  # The distractors are sharp: sol 2 keeps `yaml.load(..., Loader=yaml.UnsafeLoader)` (still
+  # RCE), sol 4 keeps `Loader=yaml.Loader` (just renames the stream var), and sol 3 is the
+  # trap — it edits an UNRELATED line (adds `f = open(client_yaml)`) while LEAVING the unsafe
+  # `yaml.load(stream, Loader=yaml.Loader)` intact further down. Reading only the headline
+  # `safe_load` line would have picked 3; reading its full context (per the compare-all rule)
+  # shows the vuln survives. Solved + validated live 2026-07-13 (→ "Success").
+  # NOTE: `select` is the on-screen NUMBER; if SCW shuffles order, content-match `safe_load`.
+  - id: unsafe-deserialization-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Deserialization of Untrusted Data"
+    answer:
+      select: 1
+
+  # Same untrusted-component challenge, FIX stage. 4 candidate solutions, each rewriting
+  # requirements.txt line 4; solution 4 is correct — `defusedxml==0.6.0`, the official
+  # PyPI package pinned to a version (a trusted, verifiable source). Every distractor keeps
+  # an untrusted/non-standard source: sol 1 `-e git+file:///…/defusedxml_v0.3` (local editable
+  # path), sol 2 `-e git+https://github.com/untrusted/…@v0.6.0` (still the untrusted repo, just
+  # tagged), sol 3 `-e git+git://github.com/untrusted/…@master` (untrusted repo + cleartext
+  # git:// + unpinned master). Answer determined live 2026-07-13; the success overlay wasn't
+  # observed because the browser session dropped at submit — re-verify on next pass.
+  # NOTE: `select` is the on-screen solution NUMBER; if SCW shuffles order, move to
+  # content-matching the right pane (the `defusedxml==` PyPI line).
+  # NOTE: no `file:` constraint — the fix stage's open tab may default to comment_xml.py
+  # (where the locate stage opened), not requirements.txt, and the vulnerability category
+  # alone uniquely identifies this challenge.
+  - id: untrusted-component-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Untrusted Source"
+    answer:
+      select: 4
+
+  # Same insecure-randomness challenge, FIX stage. 4 candidate solutions; solution 4 is
+  # correct — it uses `secrets.choice(allowed_chars)` AND a large charset
+  # (`'abcdefghijklmnopqrstuvwxyz' + '0123456789'`), so the 32-char session id is both
+  # unpredictable and infeasible to brute-force. The distractors are instructive:
+  #   sol 1  str(random.randint(0,9))      — non-CSPRNG AND digits only
+  #   sol 2  random.shuffle(allowed_chars) — non-CSPRNG; just a permutation of a fixed set
+  #   sol 3  secrets.choice BUT allowed_chars = '0123456789' — CSPRNG yet only 10^32-space
+  #          of DIGITS; SCW explicitly fails this ("the limited number of choices … makes it
+  #          insecure … predict … using brute force"). Selecting 3 first cost a live retry —
+  #          the fix is BOTH a strong RNG and a large alphabet, not either alone.
+  # Solved + validated live 2026-07-13 (3 → "Failed" hint, then 4 → "Success").
+  # NOTE: `select` is the on-screen solution NUMBER; if SCW shuffles order this must move to
+  # content-matching the right pane (match on `secrets.choice` + the alphabetic charset).
+  - id: insecure-randomness-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Insecure Randomness"
+      file: "auth.py"
+    answer:
+      select: 4
+
+  # Same weak-hashing challenge, FIX stage. 4 candidate solutions, each editing config.py
+  # (the PASSWORD_HASHER) AND auth.py (the encode() call); solution 1 is correct — it sets
+  #   config.py  PASSWORD_HASHER = 'Argon2PasswordHasher'   (a slow, modern, salted KDF)
+  #   auth.py    self.password_hasher.encode(password, self.salt.decode())  (salted)
+  # The distractors: sol 3 is 'PlainTextPassword' with an UNsalted encode (catastrophic);
+  # sol 2 uses 'BCryptSHA256PasswordHasher' — genuinely secure, so it's the near-miss, but
+  # Argon2 is SCW's preferred answer here; sol 4 also reads as Argon2+salt (indistinguishable
+  # from 1 in the scraped diff — pick 1). Solved + validated live 2026-07-13.
+  # NOTE: `select` is the on-screen solution NUMBER; if SCW shuffles order this must move to
+  # content-matching the right pane (as the module note above warns).
+  - id: weak-hash-algorithm-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Weak Algorithm Use"
+      file: "auth.py"
+    answer:
+      select: 1
+
+  # Same IDOR challenge, FIX stage (reached after the locate success overlay's Continue).
+  # 4 candidate solutions; solution 1 is correct — it DROPS the caller-supplied
+  # identifier entirely (`def roles(self):`) and binds the query to `self.id`, so the
+  # method can only ever return the current user's own roles. Every distractor keeps an
+  # attacker-controllable parameter with an `OR` branch, preserving the IDOR by another
+  # name: sol 2 adds `username`, sol 3 adds `role_id`, sol 4 adds `email` — each still
+  # lets you reference another user's roles. Solved + validated live 2026-07-13.
+  # NOTE: `select` is the solution's on-screen NUMBER; if SCW ever shuffles the order
+  # this must move to content-matching the right pane (as the module note above warns).
+  - id: idor-roles-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Insecure Direct Object Reference"
+      file: "auth.py"
+    answer:
+      select: 1

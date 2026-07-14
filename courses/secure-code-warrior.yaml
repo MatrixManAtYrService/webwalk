@@ -126,6 +126,29 @@ states:
       - { frame: [0], tag: button, text: "Review code" }
       - { frame: [0], tag: button, text: "Continue" }
 
+  # A CODING LAB — WRITE code into a code-server (VS Code web) editor, then Submit.
+  # The third SCW task type (own URL /courses/task/coding-lab/, distinct from
+  # /course-task/, /mission/course/, /courses/task/challenge/). The INTRODUCTION +
+  # STEPS panel, hint/solution, and the Submit button live in the code-editor wrapper
+  # frame [0,0]; the editor itself is cross-origin code-server at [0,0,0]. Solved via
+  # the answer key (engine/coding_lab.py + courses/coding-labs.yaml) + the `paste`
+  # action. The Submit button is the tell that we're mid-lab (it's gone once every
+  # step is done — see scw-coding-lab-complete). Captured live 2026-07-13.
+  - id: scw-coding-lab
+    url_contains: /courses/task/coding-lab/
+    title_contains: "Coding lab"
+    elements:
+      - { frame: [0, 0], tag: button, text: "Submit" }
+
+  # The coding-lab COMPLETION screen — same /coding-lab/ URL, but the lab is done: the
+  # Submit button is gone and a "Next Activity" / "Back to Course Overview" panel shows
+  # (frame [0,0]). Cleanly disjoint from scw-coding-lab (Submit vs Next Activity are
+  # mutually exclusive), so no greedy-order concern. Captured live 2026-07-13.
+  - id: scw-coding-lab-complete
+    url_contains: /courses/task/coding-lab/
+    elements:
+      - { frame: [0, 0], tag: button, text: "Next Activity" }
+
 # Rules describe how to move between states: in state `when`, do `do`, and expect
 # to land in `expect`. The rule runner (engine/runner.py) observes → matches the
 # `when` → acts → re-observes to verify. `expect` is optional: omit it while the
@@ -211,6 +234,16 @@ rules:
             selector: "//button[normalize-space(.)='Continue']", settle: 4 }
     expect: [scw-challenge, scw-course-task, scw-course-breakdown]
 
+  # Advance off a COMPLETED coding lab via its "Next Activity" button (frame [0,0]).
+  # Confirmed live 2026-07-13: Next Activity here landed on the course's next activity
+  # (a video). Any of the usual landings is acceptable.
+  - id: coding-lab-next
+    when: scw-coding-lab-complete
+    do:
+      ui: { action: click, frame: [0, 0], by: xpath,
+            selector: "//button[normalize-space(.)='Next Activity']", settle: 4 }
+    expect: [scw-course-task, scw-video-task, scw-mission, scw-challenge, scw-coding-lab, scw-course-breakdown]
+
   # Drive a mission via its step sub-loop (engine/mission.py + courses/missions.yaml).
   # The runner reads the current step, matches it against the shared step-handler
   # library, drives it, and verifies the pod ticked that step's checkbox (the
@@ -234,6 +267,18 @@ rules:
     do: { challenge: {} }
     expect: [scw-challenge-result, scw-challenge, scw-course-task, scw-course-breakdown]
 
+  # Solve a coding lab via the answer-key library (engine/coding_lab.py +
+  # courses/coding-labs.yaml). The runner reads the lab signature + which step is
+  # active from the observe snapshot, matches its pre-solved full-file content, and
+  # fires paste (the clipboard action) + Submit — one step per pass. A solved step
+  # either advances to the next step (re-entered here) or reveals the completion screen
+  # (scw-coding-lab-complete → coding-lab-next). An un-encoded lab stops the walk with
+  # the lab as context so a new answer key can be added.
+  - id: do-coding-lab
+    when: scw-coding-lab
+    do: { coding_lab: {} }
+    expect: [scw-coding-lab, scw-coding-lab-complete]
+
   # Advance to the next activity. NOTE: Continue is disabled until the task is
   # complete (for a video, until it's watched to the end — see
   # docs/video-gate-hypothesis.md). This rule only succeeds when it's enabled;
@@ -248,4 +293,9 @@ rules:
         by: xpath
         selector: '//button[contains(translate(normalize-space(.), "CONTINUE", "continue"), "continue")]'
         settle: 3
-    # expect: (unknown) — discover the next activity by running this rule.
+    # Continue lands on whatever activity is next — another course-task, a mission,
+    # or a challenge (all observed live). Same broad landing as resume-course /
+    # video-advance, so accept any: without it the walk stopped `discovered` on every
+    # single advance even onto a known state. (Course-breakdown too, in case Continue
+    # ever returns to the module overview.)
+    expect: [scw-course-task, scw-mission, scw-challenge, scw-course-breakdown]

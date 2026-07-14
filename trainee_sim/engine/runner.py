@@ -40,6 +40,7 @@ from typing import Any
 from transitions import Machine
 
 from trainee_sim.engine.challenge import match_challenge
+from trainee_sim.engine.coding_lab import assemble_view, match_coding_lab
 from trainee_sim.engine.matcher import match_report, match_states
 from trainee_sim.engine.mission import match_step, render_actions
 
@@ -87,6 +88,11 @@ def _is_mission_action(do: Any) -> bool:
 def _is_challenge_action(do: Any) -> bool:
     """True if a rule's `do` is (or contains) a `challenge` sub-flow action."""
     return any(isinstance(a, dict) and "challenge" in a for a in (do if isinstance(do, list) else [do]))
+
+
+def _is_coding_lab_action(do: Any) -> bool:
+    """True if a rule's `do` is (or contains) a `coding_lab` sub-flow action."""
+    return any(isinstance(a, dict) and "coding_lab" in a for a in (do if isinstance(do, list) else [do]))
 
 
 def _template(value: str, ctx: dict[str, Any]) -> str:
@@ -195,6 +201,7 @@ class Runner:
         mission_steps: list[dict[str, Any]] | None = None,
         verify_step: VerifyStepFn | None = None,
         challenge_handlers: list[dict[str, Any]] | None = None,
+        coding_lab_handlers: list[dict[str, Any]] | None = None,
     ) -> None:
         self.states = states
         self.rules = rules
@@ -208,6 +215,7 @@ class Runner:
         self.mission_steps = mission_steps or []  # the shared step-handler library
         self._verify_step = verify_step       # confirms a step's /complete event fired
         self.challenge_handlers = challenge_handlers or []  # the challenge answer key
+        self.coding_lab_handlers = coding_lab_handlers or []  # the coding-lab answer key
         # States explicitly flagged `terminal: true` are legitimate endpoints (e.g.
         # course complete). Any *other* state with no applicable rule is "stuck" —
         # we simply haven't encoded how to act there yet — not "done".
@@ -367,6 +375,51 @@ class Runner:
         for act in handler["acts"]:
             self._act(act)
         return {"status": "solved", "id": handler["id"], "stage": view.get("stage")}
+
+    # --- the coding-lab sub-flow (one level down: write code, not pick an option) ---
+
+    def _coding_lab_context(self, payload: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+        """Stuck-context for a coding lab we have no answer key for: which file/step is
+        open plus the live page, so a human can solve it and author a coding-labs.yaml
+        key. The lab's full STEPS copy is in `view['text']` — trimmed here to a hint."""
+        return {
+            "url": payload.get("url"),
+            "title": payload.get("title"),
+            "file": view.get("file"),
+            "active_step": view.get("active_step"),
+            "steps_text": (view.get("text") or "")[:1500],
+            "actionable": actionable_elements(payload),
+            "network": summarize_network(payload, self.api_hosts),
+        }
+
+    def _drive_coding_lab(self, payload: dict[str, Any], auto: bool) -> dict[str, Any]:
+        """Solve ONE coding-lab step: read the lab signature + active step from the
+        observe snapshot, match the answer key, and fire the step's paste + Submit acts.
+
+        One step per call, NOT a sub-loop — mirroring _drive_challenge: after Submit the
+        step either advances (the next step becomes active, re-entered here) or reveals
+        the completion screen (scw-coding-lab-complete → its own advance rule). So the
+        outer loop re-observes between steps and routes each transition; `active_step`
+        (how many steps are already complete) is what makes that resumable. Handlers
+        match on the lab's own content, so the same key fires on any replay.
+        """
+        view = assemble_view(payload)
+        handler = match_coding_lab(self.coding_lab_handlers, view)
+        if handler is None:
+            return {"status": "coding-lab-stuck", "active_step": view.get("active_step"),
+                    "context": self._coding_lab_context(payload, view)}
+        if handler.get("done"):
+            # Every step is complete but we still matched scw-coding-lab — let the outer
+            # loop re-observe and pick up the completion screen. (Shouldn't normally
+            # happen: the completion screen has no Submit, so scw-coding-lab won't match.)
+            return {"status": "coding-lab-done", "active_step": view.get("active_step")}
+        if not auto and self._confirm is not None and not self._confirm(
+            [f"coding-lab step {(view.get('active_step') or 0) + 1}"], {"id": handler["id"]}
+        ):
+            return {"status": "aborted", "active_step": view.get("active_step")}
+        for act in handler["acts"]:
+            self._act(act)
+        return {"status": "solved", "id": handler["id"], "active_step": view.get("active_step")}
 
     # --- location ---
 
@@ -547,6 +600,21 @@ class Runner:
                           "url": url, "history": history}
                 if cres.get("context"):
                     result["context"] = cres["context"]
+                return result
+
+            # A coding-lab rule solves one step via the answer-key library, then yields
+            # back to the outer loop, which re-observes and routes what comes next — the
+            # next step (still scw-coding-lab) or the completion screen.
+            if _is_coding_lab_action(rule["do"]):
+                lres = self._drive_coding_lab(payload, auto)
+                history.append({"rule": rule["id"], "from": matched, "coding_lab": lres})
+                if lres.get("status") in ("solved", "coding-lab-done"):
+                    getattr(self, rule["id"])()  # advance the flow model past this step
+                    continue                      # re-observe: next step / completion screen
+                result = {"status": "stuck", "rule": rule["id"], "coding_lab": lres,
+                          "url": url, "history": history}
+                if lres.get("context"):
+                    result["context"] = lres["context"]
                 return result
 
             self._do_action(rule["do"], payload)

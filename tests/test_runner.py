@@ -544,3 +544,71 @@ def test_challenge_without_answer_key_is_stuck_with_the_decision() -> None:
     assert result["context"]["vulnerability"] == "Session Handling - Exposed Session Tokens"
     assert [o["id"] for o in result["context"]["options"]] == ["auth.py:34-36", "auth.py:24-25"]
     assert fake.acted == []  # nothing fired
+
+
+# --- coding-lab sub-flow (write code one level down: paste the file, then Submit) ---
+
+CODING_STATES = [
+    {"id": "coding-lab", "url_contains": "/coding-lab/",
+     "elements": [{"frame": [0, 0], "tag": "button", "text": "Submit"}]},
+    {"id": "coding-lab-complete", "url_contains": "/coding-lab/",
+     "elements": [{"frame": [0, 0], "tag": "button", "text": "Next Activity"}]},
+    {"id": "done", "url_contains": "/done/", "terminal": True},
+]
+CODING_RULE = {"id": "do-coding-lab", "when": "coding-lab", "do": {"coding_lab": {}},
+               "expect": ["coding-lab", "coding-lab-complete"]}
+NEXT_RULE = {"id": "coding-lab-next", "when": "coding-lab-complete",
+             "do": {"ui": {"action": "click", "frame": [0, 0], "by": "css", "selector": "next"}},
+             "expect": ["done"]}
+CODING_KEY = [{
+    "id": "mfa", "match": {"text_contains": "implementing MFA", "file": "models.py"},
+    "steps": [{"content": "STEP ONE"}, {"content": "STEP TWO"}],
+}]
+
+
+def _cl_payload(url: str, steps_done: int = 0, submit: bool = True) -> dict[str, Any]:
+    """A coding-lab snapshot: `steps_done` completion markers + the Submit button (or,
+    once done, the Next Activity button instead — i.e. the completion screen)."""
+    markers = "".join(f"\nstep {i} is complete" for i in range(1, steps_done + 1))
+    button = {"frame": [0, 0], "tag": "button", "text": "Submit" if submit else "Next Activity"}
+    return {
+        "url": url, "title": "Coding lab",
+        "frames": [{"text": "INTRODUCTION implementing MFA" + markers}],
+        "elements": [{"tag": "textarea", "aria_label": "models.py", "frame": [0, 0, 0]}, button],
+    }
+
+
+def test_coding_lab_pastes_each_step_then_reaches_completion() -> None:
+    # obs #1: step 0 active -> paste STEP ONE + Submit; obs #2: step 1 active -> paste
+    # STEP TWO + Submit; obs #3: completion screen -> coding-lab-next -> done.
+    fake = _ChFake([
+        _cl_payload("/coding-lab/x", steps_done=0),
+        _cl_payload("/coding-lab/x", steps_done=1),
+        _cl_payload("/coding-lab/x", steps_done=2, submit=False),
+        _ch_payload("/done/y"),
+    ])
+    runner = Runner(CODING_STATES, [CODING_RULE, NEXT_RULE], fake.observe, fake.act,
+                    coding_lab_handlers=CODING_KEY)
+    result = runner.run(auto=True)
+    assert result["status"] == "done"
+    # Two paste+Submit pairs (one per step), then the Next Activity click.
+    assert [(a["action"], a.get("value") or a["selector"]) for a in fake.acted] == [
+        ("paste", "STEP ONE"),
+        ("click", '[data-testid="submit-enabled"]'),
+        ("paste", "STEP TWO"),
+        ("click", '[data-testid="submit-enabled"]'),
+        ("click", "next"),
+    ]
+    assert result["history"][0]["coding_lab"]["status"] == "solved"
+
+
+def test_coding_lab_without_answer_key_is_stuck_with_context() -> None:
+    fake = _ChFake([_cl_payload("/coding-lab/x", steps_done=0)])
+    runner = Runner(CODING_STATES, [CODING_RULE, NEXT_RULE], fake.observe, fake.act,
+                    coding_lab_handlers=[])  # no keys authored yet
+    result = runner.run(auto=True)
+    assert result["status"] == "stuck"
+    assert result["coding_lab"]["status"] == "coding-lab-stuck"
+    assert result["context"]["file"] == "models.py"
+    assert result["context"]["active_step"] == 0
+    assert fake.acted == []  # nothing fired
