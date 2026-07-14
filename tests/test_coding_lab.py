@@ -69,6 +69,25 @@ def test_file_is_none_when_no_editor_textarea() -> None:
     assert assemble_view(payload)["file"] is None
 
 
+def _badge_payload(panel: str) -> dict[str, Any]:
+    """A multi-step lab snapshot whose STEPS panel uses number badges (no 'step N is
+    complete' markers) — a done step drops its number, so the panel is the signal.
+    A trailing frame mimics the editor's line-number gutter (must NOT be counted)."""
+    return {
+        "frames": [{"text": panel}, {"text": "editor\n1\n2\n3\n4\nimport logging"}],
+        "elements": [{"tag": "textarea", "aria_label": "logger.py", "frame": EDITOR_FRAME}],
+    }
+
+
+def test_active_step_from_number_badges_when_no_complete_markers() -> None:
+    # 0 done: step 1's badge ("1") still shows -> active 0.
+    assert assemble_view(_badge_payload("STEPS\n1\nConfigure logging\n2\nLog info\n3\nLog warn"))["active_step"] == 0
+    # 1 done: step 1's number gone (checkmark), first badge is "2" -> active 1.
+    assert assemble_view(_badge_payload("STEPS\nConfigure logging\n2\nLog info\n3\nLog warn"))["active_step"] == 1
+    # 2 done: first badge is "3" -> active 2 (and the editor gutter '1\n2..' is ignored).
+    assert assemble_view(_badge_payload("STEPS\nConfigure logging\nLog info\n3\nLog warn"))["active_step"] == 2
+
+
 # --- match_coding_lab ---
 
 
@@ -113,6 +132,20 @@ def test_file_mismatch_blocks_but_unknown_file_does_not() -> None:
     view = assemble_view(_payload())
     view["file"] = None
     assert match_coding_lab(HANDLERS, view) is not None
+
+
+def test_open_file_step_prepends_a_tab_click() -> None:
+    handlers = [{
+        "id": "multi", "match": {"text_contains": "implementing MFA with the PyOTP"},
+        "steps": [{"content": "C1"}, {"open_file": "user.py", "content": "C2"}],
+    }]
+    # step 0: no open_file -> just [paste, submit].
+    assert [a["action"] for a in match_coding_lab(handlers, assemble_view(_payload(0)))["acts"]] == ["paste", "click"]
+    # step 1: open_file -> [click tab, paste, submit], and the tab click targets user.py.
+    acts = match_coding_lab(handlers, assemble_view(_payload(step_complete=1)))["acts"]
+    assert [a["action"] for a in acts] == ["click", "paste", "click"]
+    assert "user.py" in acts[0]["selector"] and acts[0]["frame"] == EDITOR_FRAME
+    assert acts[1]["value"] == "C2"
 
 
 def test_bare_string_step_is_accepted_as_content() -> None:

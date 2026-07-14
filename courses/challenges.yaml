@@ -119,6 +119,48 @@ challenges:
     answer:
       select: "requirements.txt:4-4"
 
+  # Vulnerable Components — "Using Known Vulnerable Components", Python. LOCATE stage:
+  # 4 blocks across connect.py + requirements.txt. The vuln is a dependency pinned to a
+  # version with a published CVE —
+  #   requirements.txt:1  pymongo==2.5
+  # — PyMongo < 2.5.1 is affected by CVE-2013-2132 (NULL-pointer DoS); it must be bumped
+  # to a fixed release. The others are benign: requirements.txt:3 `PyYAML==6.0.3` and
+  # requirements.txt:4 `defusedxml==0.6.0` are current/safe pins, and the connect.py
+  # blocks (the pymongo import at :5 and the MongoClient(...) setup at :14-27) are the
+  # code that USES the component, not the vulnerable component itself. Distinct from
+  # `untrusted-component-locate` (category "Untrusted Source", a git-URL dependency) —
+  # here the source is trusted PyPI but the pinned VERSION is known-vulnerable. Solved +
+  # validated live 2026-07-13.
+  - id: known-vulnerable-component-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Known Vulnerable Components"
+      options_include: ["connect.py:5-5", "connect.py:14-27", "requirements.txt:1-1", "requirements.txt:3-3"]
+    answer:
+      select: "requirements.txt:1-1"
+
+  # Same known-vulnerable-component challenge, FIX stage. 4 candidate solutions, each
+  # rewriting requirements.txt line 1 (the `pymongo==2.5` pin); solution 2 is correct —
+  #   pymongo==4.12.0
+  # a current, maintained PyPI release with no known CVE (SCW's own baseline "good" pin,
+  # cf. untrusted-component-fix). The distractors each fall short: sol 1
+  # `-e git+https://github.com/mongodb/mongo-python-driver.git@2.5.1#egg=pymongo` reaches
+  # a patched tag but reintroduces the editable-git-install anti-pattern (and stays on the
+  # ancient 2.5 line); sol 3 `pymongo==2.5.1` is only the minimal CVE-2013-2132 patch —
+  # still a 2013 release carrying later known CVEs; sol 4 `pymongo==2.4.1` is a DOWNGRADE,
+  # still vulnerable. The fix is to upgrade to a currently-maintained version, not merely
+  # to the next patch. Determined live 2026-07-13; re-verify the success overlay on replay.
+  # NOTE: `select` is the on-screen solution NUMBER; if SCW shuffles order this must move to
+  # content-matching the right pane (the `pymongo==4.12.0` line) — but fix options carry no
+  # code in the scrape, so re-read the panes by hand if the number ever changes.
+  - id: known-vulnerable-component-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Known Vulnerable Components"
+      file: "requirements.txt"
+    answer:
+      select: 2
+
   # Injection Flaws — "Deserialization of Untrusted Data", Python. LOCATE stage: 4 blocks
   # across clients.py + vehicles.py. The vuln is deserializing with the UNSAFE YAML loader —
   #   clients.py:157  client = yaml.load(stream, Loader=yaml.Loader)
@@ -225,5 +267,82 @@ challenges:
       stage: fix
       vulnerability_contains: "Insecure Direct Object Reference"
       file: "auth.py"
+    answer:
+      select: 1
+
+  # XML External Entities (XXE) — Python, provider_xml.py. LOCATE stage: 4 highlighted
+  # blocks across provider_xml.py + provider.py. The vuln is
+  #   provider_xml.py:19  parser.setFeature(handler.feature_external_ges, True)
+  # — enabling external general entities on the SAX parser makes it resolve <!ENTITY …
+  # SYSTEM '…'> references, so a crafted DOCTYPE can read local files (the paired mission
+  # exfiltrates wwwroot/backup/CreateDefaultAdmin.sql this exact way). The others are safe:
+  # provider_xml.py:35-40 is a parameterized INSERT (no SQLi), provider_xml.py:58-58 is a
+  # plain xmltodict.parse of an already-built string, provider.py:20-25 is unrelated. Solved
+  # + validated live 2026-07-13 (→ "Bingo!" success overlay). The full candidate set
+  # fingerprints THIS challenge so the key can't fire on another XXE task sharing the category.
+  - id: xxe-external-ges-locate
+    match:
+      stage: locate
+      vulnerability_contains: "XML External Entities"
+      options_include: ["provider_xml.py:19-19", "provider_xml.py:35-40", "provider_xml.py:58-58", "provider.py:20-25"]
+    answer:
+      select: "provider_xml.py:19-19"
+
+  # Same XXE challenge, FIX stage (reached after the locate success overlay's Continue).
+  # 4 candidate solutions; solution 1 is correct — it swaps the SAX parser for
+  # defusedxml's DefusedXMLParser(forbid_dtd=True, forbid_entities=True, forbid_external=True),
+  # which blocks DTDs, entity declarations, AND external resource access — the complete,
+  # library-endorsed XXE defence. The distractors all fall short: sol 2 uses lxml with
+  # resolve_entities=True + no_network=False (resolves entities AND allows network — still
+  # fully vulnerable); sol 3 is lxml resolve_entities=True + no_network=True (blocks network
+  # but STILL resolves entities, so local-file XXE — this mission's actual attack — keeps
+  # working); sol 4 leaves the original vulnerable make_parser/feature_external_ges=True code
+  # untouched. Solved + validated live 2026-07-13 (→ "Bingo!"). NOTE: `select` is the
+  # on-screen solution NUMBER; if SCW ever shuffles order this must move to content-matching
+  # the right pane (as the module notes above warn).
+  - id: xxe-external-ges-fix
+    match:
+      stage: fix
+      vulnerability_contains: "XML External Entities"
+      file: "provider_xml.py"
+    answer:
+      select: 1
+
+  # Insufficient Logging and Monitoring — Python, __init__.py + logging_config.py. LOCATE
+  # stage: 4 highlighted blocks. The vuln is the console log handler —
+  #   logging_config.py:22-28  'console': {'class': 'logging.StreamHandler',
+  #                              'formatter': 'simple', 'level': 'INFO'}
+  # — it's the ONLY handler (console/StreamHandler = ephemeral stdout, nothing persisted for
+  # monitoring) AND it uses the 'simple' formatter, which OMITS %(asctime)s, so log lines have
+  # no timestamp — useless for an incident timeline. (A 'detailed' formatter WITH asctime is
+  # defined right above but goes unused.) The others are safe: __init__.py:5-5 just applies the
+  # config (dictConfig), logging_config.py:17-20 is the 'simple' formatter definition itself,
+  # and :10-10 is disable_existing_loggers (a red herring — tried it live, got Retry). Solved +
+  # validated live 2026-07-13 (block 22-28 → "Bingo!"). Full candidate set fingerprints this one.
+  - id: insufficient-logging-locate
+    match:
+      stage: locate
+      vulnerability_contains: "Insufficient Logging"
+      options_include: ["__init__.py:5-5", "logging_config.py:10-10", "logging_config.py:17-20", "logging_config.py:22-28"]
+    answer:
+      select: "logging_config.py:22-28"
+
+  # Same challenge, FIX stage (reached after the locate success overlay's Continue). 4 candidate
+  # solutions; solution 1 is correct — it adds a persistent 'file' handler (FileHandler → debug.log,
+  # 'detailed'/timestamped formatter, INFO) AND an 'errors' handler (FileHandler → errors.log,
+  # 'detailed', WARNING), and points the root logger at ['console','file','errors']. The distractors
+  # (a textbook "compare ALL changed lines" trap — see the challenge-fix-compare-all memory): sol 2
+  # GUTS both formatters (detailed → just asctime+name, simple → just name), losing level/module/
+  # message; sol 3 references a 'file' handler in the root logger but NEVER DEFINES it (dictConfig
+  # would raise ValueError) and sets its 'errors' handler to level ERROR, missing the WARNING-level
+  # security events; sol 4 sets the root level to 'CRITICAL', suppressing everything below it. Solved
+  # + validated live 2026-07-13 (→ "Bingo!"). No `file:` constraint here — the vulnerability category
+  # alone is unique, and the fix-stage default open tab isn't guaranteed. NOTE: `select` is the
+  # on-screen solution NUMBER; sol 1 and sol 3 are near-identical, so if SCW ever shuffles the order
+  # this MUST move to content-matching (assert the right pane defines a 'file' handler, level WARNING).
+  - id: insufficient-logging-fix
+    match:
+      stage: fix
+      vulnerability_contains: "Insufficient Logging"
     answer:
       select: 1

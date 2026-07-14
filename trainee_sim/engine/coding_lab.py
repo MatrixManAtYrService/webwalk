@@ -32,8 +32,33 @@ EDITOR_FRAME = [0, 0, 0]
 SUBMIT_SELECTOR = '[data-testid="submit-enabled"]'
 SUBMIT_FRAME = [0, 0]
 
-# "step 2 is complete" — the per-step done marker in the wrapper's STEPS panel.
+# "step 2 is complete" — the per-step done marker some labs render in the wrapper's
+# STEPS panel. Not universal: multi-step labs instead mark a done step by swapping its
+# NUMBER badge for a checkmark (no text), so the panel simply stops showing that step's
+# number — see `_active_step_from_badges`.
 _COMPLETE_RE = re.compile(r"step\s+(\d+)\s+is complete", re.IGNORECASE)
+
+# A step-number badge on its own line in the STEPS panel (e.g. "\n2\n"). A DONE step
+# shows a checkmark instead of its number, so the FIRST number still present after the
+# "STEPS" heading is the active step (1-based). Captured live 2026-07-13 on the 3-step
+# "Improve Python logging" lab: 0 done → "STEPS\n1\nConfigure…"; 1 done → "STEPS\n
+# Configure…\n2\nLog an informative…"; 2 done → "…\n3\nLog a warning…".
+_STEP_BADGE_RE = re.compile(r"\n\s*(\d+)\s*\n")
+
+
+def _active_step_from_badges(text: str) -> int | None:
+    """0-based active step from the STEPS-panel number badges, or None if the panel
+    isn't recognizable. The active step is the first whose number badge is still shown
+    (done steps swap the number for a checkmark), so `active_step = first_number - 1`.
+
+    Searches only *after* the "STEPS" heading so the code editor's line-number gutter
+    (a later frame in the concatenated text) can't be mistaken for a step badge.
+    """
+    i = text.find("STEPS")
+    if i < 0:
+        return None
+    m = _STEP_BADGE_RE.search(text[i:])
+    return int(m.group(1)) - 1 if m else None
 
 
 def assemble_view(payload: dict[str, Any]) -> dict[str, Any]:
@@ -51,18 +76,32 @@ def assemble_view(payload: dict[str, Any]) -> dict[str, Any]:
     frames = payload.get("frames") or []
     text = "\n".join((f.get("text") or "") for f in frames)
     done = [int(n) for n in _COMPLETE_RE.findall(text)]
+    # Two ways a lab signals progress: the "step N is complete" markers (single-step
+    # labs) or the STEPS-panel number badges (multi-step labs, which show no such
+    # marker — see _active_step_from_badges). Prefer the explicit marker; fall back to
+    # the badge; default to 0 (mid-first-step) when neither is present.
+    active_step = max(done) if done else (_active_step_from_badges(text) or 0)
     file = None
     for el in payload.get("elements") or []:
         if el.get("tag") == "textarea" and el.get("aria_label") and el.get("frame") == EDITOR_FRAME:
             file = el["aria_label"]
             break
-    return {"text": text, "file": file, "active_step": max(done) if done else 0}
+    return {"text": text, "file": file, "active_step": active_step}
 
 
 def _paste_act(content: str, selector: str, frame: list[int]) -> dict[str, Any]:
     """A ready-to-fire `paste` action: replace the editor's content with `content`."""
     return {"action": "paste", "by": "css", "selector": selector, "frame": frame,
             "value": content, "settle": 2}
+
+
+def _open_file_act(filename: str) -> dict[str, Any]:
+    """Click the editor tab for `filename`, so a step that lives in a different file than
+    the one currently open (a multi-file lab) is pasted into the right editor. The tabs
+    are `[role=tab]` elements in the code-server frame; match by the filename text."""
+    return {"action": "click", "by": "xpath",
+            "selector": f"//*[@role='tab'][contains(., '{filename}')]",
+            "frame": EDITOR_FRAME, "settle": 2}
 
 
 def _submit_act() -> dict[str, Any]:
@@ -110,6 +149,9 @@ def match_coding_lab(handlers: list[dict[str, Any]], view: dict[str, Any]) -> di
         content = step.get("content", "") if isinstance(step, dict) else str(step)
         selector = step.get("selector", EDITOR_SELECTOR) if isinstance(step, dict) else EDITOR_SELECTOR
         frame = step.get("frame", EDITOR_FRAME) if isinstance(step, dict) else EDITOR_FRAME
-        return {"id": handler.get("id"), "active_step": i, "done": False,
-                "acts": [_paste_act(content, selector, frame), _submit_act()]}
+        # A step may target a different file than the one currently open — `open_file`
+        # switches the editor tab first (multi-file labs, e.g. logger.py then user.py).
+        open_file = step.get("open_file") if isinstance(step, dict) else None
+        acts = ([_open_file_act(open_file)] if open_file else []) + [_paste_act(content, selector, frame), _submit_act()]
+        return {"id": handler.get("id"), "active_step": i, "done": False, "acts": acts}
     return None

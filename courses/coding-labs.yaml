@@ -128,3 +128,284 @@ coding_labs:
 
           def __repr__(self) -> str:
               return f"User(id={self.id!r})"
+
+- id: insecure-deserialization-python-flashpoint
+  # "Implement JSON data format" — swap pickle for json in serializer.py to avoid
+  # native (de)serialization. ONE step, two tasks (serialize + deserialize); the
+  # whole-file paste covers both at once. Matched on the intro's distinctive
+  # vulnerability name (always in the frame text) rather than the editor tab, which
+  # isn't reliably captured as the filename. Solved + captured live 2026-07-13.
+  match:
+    text_contains: insecure deserialization or object injection
+  steps:
+  - content: |
+      import json
+      import logging
+
+      logger = logging.getLogger(__name__)
+
+
+      class SerializerService:
+          @staticmethod
+          def serialize(obj: dict):
+              return json.dumps(obj)
+
+          @staticmethod
+          def deserialize(data) -> dict:
+              result = json.loads(data)
+              if not isinstance(result, dict):
+                  logger.warning("Failed deserialization: data is not a dict.")
+                  raise ValueError("Invalid data.")
+
+              return result
+
+- id: ssrf-api-python-flashpoint
+  # "SSRF" lab on api.py — the Flashpoint image-download feature lacks URL validation.
+  # THREE cumulative steps, one task each: (1) validate_scheme allowlists ALLOWED_SCHEMES
+  # via urlparse(...).scheme; (2) validate_host allowlists ALLOWED_HOSTS via
+  # urlparse(...).hostname; (3) RedirectHandler.http_error_307 raises if "location" not
+  # in headers (the open-redirect task, worded literally by SCW). Each step's content is
+  # the WHOLE file with all fixes THROUGH that step (paste replaces the file). Solved +
+  # validated LIVE end-to-end 2026-07-13 (steps 1/2/3 complete → lab done). NOTE: the pod
+  # Submit is flaky — a first click can return "Error submitting solution"; the runner
+  # self-heals because active_step stays put, so do-coding-lab re-pastes + re-submits.
+  match:
+    text_contains: The fetch_image method fetches an image
+    file: api.py
+  steps:
+  - content: |
+      import logging
+      from urllib.parse import urlparse
+      from urllib.request import build_opener, HTTPRedirectHandler, install_opener, urlretrieve
+
+      from utils import encode_url
+
+      logger = logging.getLogger(__name__)
+
+
+      class RedirectHandler(HTTPRedirectHandler):
+          def http_error_307(self, req, fp, code, msg, headers):
+              return super().http_error_307(req, fp, code, msg, headers)
+
+          http_error_301 = http_error_302 = http_error_303 = http_error_307
+
+
+      class ApiService:
+          ALLOWED_SCHEMES = ("https",)
+          ALLOWED_HOSTS = ("flashpointkiosk.com",)
+
+          def __init__(self, url):
+              self.url = url
+
+          def validate_scheme(self) -> bool:
+              return urlparse(self.url).scheme in self.ALLOWED_SCHEMES
+
+          def validate_host(self) -> bool:
+              return True
+
+          def fetch_image(self) -> str:
+              if not self.validate_scheme():
+                  logger.error(f"Not allowed scheme for url: {encode_url(self.url)}")
+                  raise Exception("The scheme is not allowed.")
+
+              if not self.validate_host():
+                  logger.error(f"Not allowed host for url: {encode_url(self.url)}")
+                  raise Exception("The host is not allowed.")
+
+              opener = build_opener(RedirectHandler)
+              install_opener(opener)
+
+              try:
+                  local_filename, headers = urlretrieve(self.url)
+                  return local_filename
+              except Exception as e:
+                  logger.exception("Failed to retrieve image.", exc_info=True)
+                  raise Exception("Failed to retrieve image.") from e
+  - content: |
+      import logging
+      from urllib.parse import urlparse
+      from urllib.request import build_opener, HTTPRedirectHandler, install_opener, urlretrieve
+
+      from utils import encode_url
+
+      logger = logging.getLogger(__name__)
+
+
+      class RedirectHandler(HTTPRedirectHandler):
+          def http_error_307(self, req, fp, code, msg, headers):
+              return super().http_error_307(req, fp, code, msg, headers)
+
+          http_error_301 = http_error_302 = http_error_303 = http_error_307
+
+
+      class ApiService:
+          ALLOWED_SCHEMES = ("https",)
+          ALLOWED_HOSTS = ("flashpointkiosk.com",)
+
+          def __init__(self, url):
+              self.url = url
+
+          def validate_scheme(self) -> bool:
+              return urlparse(self.url).scheme in self.ALLOWED_SCHEMES
+
+          def validate_host(self) -> bool:
+              return urlparse(self.url).hostname in self.ALLOWED_HOSTS
+
+          def fetch_image(self) -> str:
+              if not self.validate_scheme():
+                  logger.error(f"Not allowed scheme for url: {encode_url(self.url)}")
+                  raise Exception("The scheme is not allowed.")
+
+              if not self.validate_host():
+                  logger.error(f"Not allowed host for url: {encode_url(self.url)}")
+                  raise Exception("The host is not allowed.")
+
+              opener = build_opener(RedirectHandler)
+              install_opener(opener)
+
+              try:
+                  local_filename, headers = urlretrieve(self.url)
+                  return local_filename
+              except Exception as e:
+                  logger.exception("Failed to retrieve image.", exc_info=True)
+                  raise Exception("Failed to retrieve image.") from e
+  - content: |
+      import logging
+      from urllib.parse import urlparse
+      from urllib.request import build_opener, HTTPRedirectHandler, install_opener, urlretrieve
+
+      from utils import encode_url
+
+      logger = logging.getLogger(__name__)
+
+
+      class RedirectHandler(HTTPRedirectHandler):
+          def http_error_307(self, req, fp, code, msg, headers):
+              if "location" not in headers:
+                  raise Exception("No location header found.")
+              return super().http_error_307(req, fp, code, msg, headers)
+
+          http_error_301 = http_error_302 = http_error_303 = http_error_307
+
+
+      class ApiService:
+          ALLOWED_SCHEMES = ("https",)
+          ALLOWED_HOSTS = ("flashpointkiosk.com",)
+
+          def __init__(self, url):
+              self.url = url
+
+          def validate_scheme(self) -> bool:
+              return urlparse(self.url).scheme in self.ALLOWED_SCHEMES
+
+          def validate_host(self) -> bool:
+              return urlparse(self.url).hostname in self.ALLOWED_HOSTS
+
+          def fetch_image(self) -> str:
+              if not self.validate_scheme():
+                  logger.error(f"Not allowed scheme for url: {encode_url(self.url)}")
+                  raise Exception("The scheme is not allowed.")
+
+              if not self.validate_host():
+                  logger.error(f"Not allowed host for url: {encode_url(self.url)}")
+                  raise Exception("The host is not allowed.")
+
+              opener = build_opener(RedirectHandler)
+              install_opener(opener)
+
+              try:
+                  local_filename, headers = urlretrieve(self.url)
+                  return local_filename
+              except Exception as e:
+                  logger.exception("Failed to retrieve image.", exc_info=True)
+                  raise Exception("Failed to retrieve image.") from e
+
+# XXE — "Prevent XML External Entities in Python" (Flashpoint kiosk, Python Basic).
+# ONE step. The assignment's parser.py uses defusedxml.ElementTree.parse but explicitly
+# WEAKENS it (forbid_entities=False, forbid_external=False, and no forbid_dtd → default
+# False), re-opening XXE. The fix sets all three defusedxml guards True: forbid_dtd (no
+# DTDs), forbid_entities (no entity declarations), forbid_external (no remote/local
+# resource access). Matched on the intro's defusedxml phrasing + the parser.py tab, so it
+# can't fire on the other Flashpoint labs. Solved + validated LIVE end-to-end 2026-07-13
+# (paste → Submit → scw-coding-lab-complete "Next Activity" screen).
+- id: xxe-defusedxml-parser
+  match:
+    text_contains: using the defusedxml library to parse XML files
+    file: parser.py
+  steps:
+  - content: |
+      from defusedxml.ElementTree import parse
+
+
+      def parse_xml(file: str):
+          tree = parse(file, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+          return tree
+
+# Insufficient Logging and Monitoring — "Improve Python logging" (Flashpoint kiosk, Python
+# Basic). THREE steps across TWO files — the first multi-step / multi-file lab, which drove
+# the coding-lab engine's badge-based active_step detection and per-step `open_file` tab
+# switching (see engine/coding_lab.py). Step 1 (logger.py): rewrite the basicConfig format so
+# each line carries the when/who/what/severity — asctime, name, levelname, message (the
+# default asctime already renders the sortable "yyyy-MM-dd HH:mm:ss,fff"). Steps 2 & 3
+# (user.py): add a logger call mirroring each console print, at the right level — INFO for the
+# login attempt and the successful login, WARNING for the failed login — and mask the email
+# (PII) with the already-imported mask_email in every logged message. Solved + validated LIVE
+# end-to-end 2026-07-13 (each step's checkmark advanced; scw-coding-lab-complete reached).
+# Matched on the intro phrase alone (NO file pin — the open file changes across steps).
+- id: improve-python-logging
+  match:
+    text_contains: improve Flashpoint Kiosk logging
+  steps:
+  - open_file: logger.py
+    content: |
+      import logging
+
+      def init_logging_config():
+          logging.basicConfig(
+              level=logging.DEBUG,
+              filename="logs/flashpoint.log",
+              format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+          )
+  - open_file: user.py
+    content: |
+      import logging
+      from db.models import User
+      from utils import mask_email
+
+      logger = logging.getLogger(__name__)
+
+
+      class UserService:
+          @staticmethod
+          def login(session, email: str, password: str) -> User:
+              print(f"User log in attempt: {email}")
+              logger.info(f"User log in attempt: {mask_email(email)}")
+              user = session.query(User).filter_by(email=email).first()
+              if user and user.check_password(password):
+                  print(f"User {email} was successfully logged in")
+                  logger.info(f"User {mask_email(email)} was successfully logged in")
+                  return user
+              else:
+                  print(f"Failed to log in user: {email}")
+  - open_file: user.py
+    content: |
+      import logging
+      from db.models import User
+      from utils import mask_email
+
+      logger = logging.getLogger(__name__)
+
+
+      class UserService:
+          @staticmethod
+          def login(session, email: str, password: str) -> User:
+              print(f"User log in attempt: {email}")
+              logger.info(f"User log in attempt: {mask_email(email)}")
+              user = session.query(User).filter_by(email=email).first()
+              if user and user.check_password(password):
+                  print(f"User {email} was successfully logged in")
+                  logger.info(f"User {mask_email(email)} was successfully logged in")
+                  return user
+              else:
+                  print(f"Failed to log in user: {email}")
+                  logger.warning(f"Failed to log in user: {mask_email(email)}")
