@@ -152,6 +152,7 @@ def match_coding_lab(handlers: list[dict[str, Any]], view: dict[str, Any]) -> di
         # A step may target a different file than the one currently open — `open_file`
         # switches the editor tab first (multi-file labs, e.g. logger.py then user.py).
         open_file = step.get("open_file") if isinstance(step, dict) else None
-        acts = ([_open_file_act(open_file)] if open_file else []) + [_paste_act(content, selector, frame), _submit_act()]
+        acts = ([_open_file_act(open_file)] if open_file else []) + [
+            _paste_act(content, selector, frame), _submit_act()]
         return {"id": handler.get("id"), "active_step": i, "done": False, "acts": acts}
     return None

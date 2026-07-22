@@ -9,7 +9,7 @@ without a live browser.
 
 from __future__ import annotations
 
-from trainee_sim.server.recorder import NetworkRecorder
+from webwalk.server.recorder import NetworkRecorder
 
 
 def _request(request_id: str, url: str, method: str = "GET", rtype: str = "XHR", headers=None, post_data=None):

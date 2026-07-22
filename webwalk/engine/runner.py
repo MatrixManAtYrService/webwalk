@@ -39,10 +39,8 @@ from typing import Any
 
 from transitions import Machine
 
-from trainee_sim.engine.challenge import match_challenge
-from trainee_sim.engine.coding_lab import assemble_view, match_coding_lab
-from trainee_sim.engine.matcher import match_report, match_states
-from trainee_sim.engine.mission import match_step, render_actions
+from webwalk.engine.matcher import match_report, match_states
+from webwalk.engine.subflow import SubFlow
 
 # Tags whose elements are worth offering as things to act on when the walker
 # stops — the raw material for a UI rule's selector. Everything else (divs,
@@ -63,36 +61,6 @@ ActFn = Callable[[dict[str, Any]], None]          # (ui-action dict) -> perform 
 ConfirmFn = Callable[[list[str], dict[str, Any]], bool]  # (matched states, rule) -> proceed?
 HttpFn = Callable[[str, str, dict[str, str], str | None], dict[str, Any]]  # (method,url,headers,body)->resp
 EvalFn = Callable[[str, str | None], Any]         # (js, frame) -> evaluated value (frame None = top)
-# () -> {active_index, steps:[instruction…], checkable:{orders…}} for the mission
-# we're on, or None. `active_index` is the current step: derived from the observable
-# step-checkboxes (the first unticked one), not portal's stale `activeIndex`.
-# `checkable` is the set of step orders that actually have a checklist checkbox;
-# orders missing from it are informational (no box, no verification). See CLI wiring.
-ReadMissionFn = Callable[[], dict[str, Any] | None]
-# (step order) -> did the pod tick that step's checkbox within a timeout? The
-# checkbox `checked` state is the synchronous, in-snapshot completion signal.
-VerifyStepFn = Callable[[int], bool]
-
-
-def _step_brief(step: dict[str, Any]) -> dict[str, Any]:
-    """The human-facing slice of a mission step (for reporting / stuck context)."""
-    return {"order": step.get("order"), "title": step.get("title"),
-            "description": (step.get("description") or "").strip()}
-
-
-def _is_mission_action(do: Any) -> bool:
-    """True if a rule's `do` is (or contains) a `mission` sub-flow action."""
-    return any(isinstance(a, dict) and "mission" in a for a in (do if isinstance(do, list) else [do]))
-
-
-def _is_challenge_action(do: Any) -> bool:
-    """True if a rule's `do` is (or contains) a `challenge` sub-flow action."""
-    return any(isinstance(a, dict) and "challenge" in a for a in (do if isinstance(do, list) else [do]))
-
-
-def _is_coding_lab_action(do: Any) -> bool:
-    """True if a rule's `do` is (or contains) a `coding_lab` sub-flow action."""
-    return any(isinstance(a, dict) and "coding_lab" in a for a in (do if isinstance(do, list) else [do]))
 
 
 def _template(value: str, ctx: dict[str, Any]) -> str:
@@ -197,11 +165,7 @@ class Runner:
         http: HttpFn | None = None,
         eval_js: EvalFn | None = None,
         api_hosts: list[str] | None = None,
-        read_mission: ReadMissionFn | None = None,
-        mission_steps: list[dict[str, Any]] | None = None,
-        verify_step: VerifyStepFn | None = None,
-        challenge_handlers: list[dict[str, Any]] | None = None,
-        coding_lab_handlers: list[dict[str, Any]] | None = None,
+        subflows: list[SubFlow] | None = None,
     ) -> None:
         self.states = states
         self.rules = rules
@@ -211,11 +175,10 @@ class Runner:
         self._http = http          # for `http` actions (fire an in-page request)
         self._eval = eval_js       # for context sourced from page JS (e.g. sessionId)
         self.api_hosts = api_hosts  # host filter for the network view in diagnostics
-        self._read_mission = read_mission     # reads {active_index, steps} for a mission
-        self.mission_steps = mission_steps or []  # the shared step-handler library
-        self._verify_step = verify_step       # confirms a step's /complete event fired
-        self.challenge_handlers = challenge_handlers or []  # the challenge answer key
-        self.coding_lab_handlers = coding_lab_handlers or []  # the coding-lab answer key
+        # Pluggable "one level down" handlers (mission, challenge, coding-lab, …),
+        # supplied by the flow package. A rule whose `do` names a sub-flow's
+        # `action_key` hands off to it. Empty for a plain page-state walk.
+        self._subflows = subflows or []
         # States explicitly flagged `terminal: true` are legitimate endpoints (e.g.
         # course complete). Any *other* state with no applicable rule is "stuck" —
         # we simply haven't encoded how to act there yet — not "done".
@@ -247,179 +210,16 @@ class Runner:
             ]
         return ctx
 
-    def _mission_context(self, step: dict[str, Any]) -> dict[str, Any]:
-        """Stuck-context for a mission step we can't handle: the step text plus the
-        live app form, so the agent can perform it and then author a handler."""
-        payload = self._observe()
-        return {
-            "url": payload.get("url"),
-            "title": payload.get("title"),
-            "step": _step_brief(step),
-            "actionable": actionable_elements(payload),
-            "network": summarize_network(payload, self.api_hosts),
-        }
-
-    # --- the mission sub-loop (one level down: steps, not page states) ---
-
-    def _drive_mission(self, auto: bool, max_steps: int = 15) -> dict[str, Any]:
-        """Walk a mission's steps: read the playbook + entry point once, then for
-        each step match it against the shared step-handler library, drive the
-        handler, and verify the pod ticked that step's checkbox. Stops on
-        completion, on an un-encoded step (`mission-stuck`), or on a step that
-        didn't take (`mission-blocked`).
-
-        Both the entry point (`active_index`) and per-step verification come from
-        the step-checkboxes captured in the observe snapshot — the synchronous,
-        always-present completion signal — NOT portal's `activeIndex`, which is a
-        stale mirror that doesn't move as steps complete (see docs/mission-api.md).
-        We advance the step index locally once a step is confirmed.
-
-        Handlers match on the step's own signature, so the same `login-as` fires in
-        any mission — the recurring-prefix reuse that motivates this design.
-        """
-        if self._read_mission is None:
-            return {"status": "mission-unreadable", "reason": "no mission reader wired"}
-        ms = self._read_mission()
-        if not ms:
-            return {"status": "mission-unreadable"}
-        steps = ms.get("steps") or []
-        idx = ms.get("active_index") or 0  # portal's coarse entry point (resume hint)
-        # Orders that have a checklist checkbox — i.e. pod-gated steps. A step whose
-        # order is absent from a NON-EMPTY set is *informational* (e.g. "Inspect the
-        # URL"): the checklist renders no box for it, so there's nothing to do and
-        # nothing to verify — we just advance past it. When the set is empty/None the
-        # pod boxes simply weren't captured, so we don't skip anything.
-        checkable = ms.get("checkable")
-        steps_done: list[dict[str, Any]] = []
-
-        for _ in range(max_steps):
-            if idx >= len(steps):
-                return {"status": "complete", "active_index": idx, "steps_done": steps_done}
-
-            step = steps[idx]
-            if checkable and step.get("order") not in checkable:
-                steps_done.append({"index": idx, "handler": None, "step_id": step.get("id"),
-                                   "informational": True, "completed": True})
-                idx += 1
-                continue
-
-            handler = match_step(self.mission_steps, step)
-            if handler is None:
-                return {"status": "mission-stuck", "active_index": idx, "step": _step_brief(step),
-                        "context": self._mission_context(step), "steps_done": steps_done}
-            if not auto and self._confirm is not None and not self._confirm(
-                [f"mission step {idx}: {step.get('title')}"], {"id": handler["id"]}
-            ):
-                return {"status": "aborted", "active_index": idx, "steps_done": steps_done}
-
-            # A handler may source vars from the LIVE page (its `context` block) — a
-            # value scraped from the DOM/URL, like a stolen session token — not just
-            # from the step text. match_step left those `{page_var}` placeholders in
-            # `do`; resolve them now (needs I/O, so it's here not in the pure matcher)
-            # and template them in with a second render pass before acting.
-            do = handler["do"]
-            if handler.get("context"):
-                page_ctx = self._build_context(handler["context"], self._observe())
-                do = render_actions(do, page_ctx)
-            self._do_action(do, {})
-            completed = bool(self._verify_step and self._verify_step(step.get("order")))
-            steps_done.append({"index": idx, "handler": handler["id"],
-                               "step_id": step.get("id"), "completed": completed})
-            if not completed:
-                return {"status": "mission-blocked", "active_index": idx, "handler": handler["id"],
-                        "step": _step_brief(step), "context": self._mission_context(step),
-                        "steps_done": steps_done}
-            idx += 1
-        return {"status": "mission-max-steps", "steps_done": steps_done}
-
-    # --- the challenge sub-flow (one level down: a decision, not a page state) ---
-
-    def _challenge_context(self, payload: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
-        """Stuck-context for a challenge we have no answer key for: the decision
-        view itself — stage, vulnerability, and the enumerated options with their
-        code — so a human can pick the answer and author a `challenges.yaml` key."""
-        return {
-            "url": payload.get("url"),
-            "stage": view.get("stage"),
-            "file": view.get("file"),
-            "vulnerability": view.get("vulnerability"),
-            "decision": view.get("decision"),
-            "options": [{"id": o.get("id"), "code": o.get("code")} for o in view.get("options") or []],
-        }
-
-    def _drive_challenge(self, payload: dict[str, Any], auto: bool) -> dict[str, Any]:
-        """Answer ONE challenge decision: read the embedded decision view, match it
-        against the answer-key library, and fire the option's select + Submit acts.
-
-        Deliberately one decision per call, NOT a sub-loop: a challenge stage either
-        completes (a success overlay appears — handled by an overlay rule in the
-        OUTER loop, which is why that rule must precede this one) or advances to the
-        next stage (locate -> fix), which the outer loop re-enters as `scw-challenge`
-        again. So the runner re-observes between decisions and lets its page rules
-        route each transition — no completion-detection guesswork here. Handlers
-        match on the challenge's own content, so the same key fires on any replay.
-        """
-        view = payload.get("challenge")
-        if not view or view.get("stage") in (None, "none"):
-            # No decidable editor here — the overlay is likely up covering it; report
-            # so the outer loop's overlay/next rules (or a human) can take over.
-            return {"status": "challenge-none"}
-        handler = match_challenge(self.challenge_handlers, view)
-        if handler is None:
-            return {"status": "challenge-stuck", "stage": view.get("stage"),
-                    "context": self._challenge_context(payload, view)}
-        if not auto and self._confirm is not None and not self._confirm(
-            [f"challenge {view.get('stage')}: {view.get('vulnerability')}"], {"id": handler["id"]}
-        ):
-            return {"status": "aborted", "stage": view.get("stage")}
-        for act in handler["acts"]:
-            self._act(act)
-        return {"status": "solved", "id": handler["id"], "stage": view.get("stage")}
-
-    # --- the coding-lab sub-flow (one level down: write code, not pick an option) ---
-
-    def _coding_lab_context(self, payload: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
-        """Stuck-context for a coding lab we have no answer key for: which file/step is
-        open plus the live page, so a human can solve it and author a coding-labs.yaml
-        key. The lab's full STEPS copy is in `view['text']` — trimmed here to a hint."""
-        return {
-            "url": payload.get("url"),
-            "title": payload.get("title"),
-            "file": view.get("file"),
-            "active_step": view.get("active_step"),
-            "steps_text": (view.get("text") or "")[:1500],
-            "actionable": actionable_elements(payload),
-            "network": summarize_network(payload, self.api_hosts),
-        }
-
-    def _drive_coding_lab(self, payload: dict[str, Any], auto: bool) -> dict[str, Any]:
-        """Solve ONE coding-lab step: read the lab signature + active step from the
-        observe snapshot, match the answer key, and fire the step's paste + Submit acts.
-
-        One step per call, NOT a sub-loop — mirroring _drive_challenge: after Submit the
-        step either advances (the next step becomes active, re-entered here) or reveals
-        the completion screen (scw-coding-lab-complete → its own advance rule). So the
-        outer loop re-observes between steps and routes each transition; `active_step`
-        (how many steps are already complete) is what makes that resumable. Handlers
-        match on the lab's own content, so the same key fires on any replay.
-        """
-        view = assemble_view(payload)
-        handler = match_coding_lab(self.coding_lab_handlers, view)
-        if handler is None:
-            return {"status": "coding-lab-stuck", "active_step": view.get("active_step"),
-                    "context": self._coding_lab_context(payload, view)}
-        if handler.get("done"):
-            # Every step is complete but we still matched scw-coding-lab — let the outer
-            # loop re-observe and pick up the completion screen. (Shouldn't normally
-            # happen: the completion screen has no Submit, so scw-coding-lab won't match.)
-            return {"status": "coding-lab-done", "active_step": view.get("active_step")}
-        if not auto and self._confirm is not None and not self._confirm(
-            [f"coding-lab step {(view.get('active_step') or 0) + 1}"], {"id": handler["id"]}
-        ):
-            return {"status": "aborted", "active_step": view.get("active_step")}
-        for act in handler["acts"]:
-            self._act(act)
-        return {"status": "solved", "id": handler["id"], "active_step": view.get("active_step")}
+    def _subflow_for(self, do: Any) -> SubFlow | None:
+        """The registered sub-flow a rule's `do` invokes, if any — matched by the
+        sub-flow's `action_key` appearing as a key in the `do` action(s). None for
+        an ordinary `ui`/`http`/`eval` rule."""
+        actions = do if isinstance(do, list) else [do]
+        keys = {k for a in actions if isinstance(a, dict) for k in a}
+        for sf in self._subflows:
+            if sf.action_key in keys:
+                return sf
+        return None
 
     # --- location ---
 
@@ -517,8 +317,10 @@ class Runner:
           reached     — we're in the goal state `to`
           done        — a state flagged `terminal: true` with no applicable rule
                         (a real endpoint, e.g. course complete)
-          mission-complete — a mission sub-flow drove every step to done
-                        (`mission` holds the per-step trail)
+          <sub-flow checkpoint> — a sub-flow ran to a success but the page offers no
+                        onward rule, so its `checkpoint_status` is reported (e.g. a
+                        mission sub-flow's `mission-complete`); the sub-flow's
+                        `history_key` holds the per-step trail
           discovered  — a rule with no `expect` landed us somewhere; its `landed`
                         state is the thing to add a signature for
           unexpected  — a rule's `expect` didn't match where we actually landed
@@ -561,60 +363,34 @@ class Runner:
 
             self.machine.set_state(rule["when"])  # reconcile the model with reality
 
-            # A mission rule hands off to the step sub-loop, which is atomic within
-            # this outer step: it drives the mission to completion or to a stop, and
-            # we report either way (a mission never silently continues the walk).
-            if _is_mission_action(rule["do"]):
-                mres = self._drive_mission(auto)
-                history.append({"rule": rule["id"], "from": matched, "mission": mres})
-                if mres.get("status") == "complete":
-                    getattr(self, rule["id"])()  # advance the flow model past the mission
-                    # A finished mission shouldn't dead-end the walk: if the page now
-                    # offers a way onward (a results "Continue" → some page rule), keep
-                    # going. Only when nothing non-mission applies is this a genuine
-                    # checkpoint we report as `mission-complete`.
-                    _, after_matched = self.locate()
-                    onward = [r for r in self.applicable_rules(after_matched) if not _is_mission_action(r["do"])]
-                    if to and to in after_matched:
-                        return {"status": "reached", "state": to, "url": url, "history": history}
-                    if onward:
-                        continue
-                    return {"status": "mission-complete", "rule": rule["id"], "mission": mres,
-                            "url": url, "history": history}
-                result = {"status": "stuck", "rule": rule["id"], "mission": mres,
+            # A sub-flow rule hands off "one level down" (a mission's steps, a
+            # challenge decision, a coding-lab paste). The sub-flow runs to a stop
+            # and we report either way — a sub-flow never silently continues the walk.
+            subflow = self._subflow_for(rule["do"])
+            if subflow is not None:
+                sres = subflow.drive(self, payload, auto)
+                history.append({"rule": rule["id"], "from": matched, subflow.history_key: sres})
+                if sres.get("status") in subflow.success_statuses:
+                    getattr(self, rule["id"])()  # advance the flow model past the sub-flow
+                    if subflow.check_onward:
+                        # A completed sub-flow shouldn't dead-end the walk: if the page
+                        # now offers a way onward (e.g. a results "Continue" → some page
+                        # rule), keep going. Only when nothing but this same sub-flow
+                        # applies is it a genuine checkpoint we report.
+                        _, after_matched = self.locate()
+                        if to and to in after_matched:
+                            return {"status": "reached", "state": to, "url": url, "history": history}
+                        onward = [r for r in self.applicable_rules(after_matched)
+                                  if self._subflow_for(r["do"]) is not subflow]
+                        if onward:
+                            continue
+                        return {"status": subflow.checkpoint_status, "rule": rule["id"],
+                                subflow.history_key: sres, "url": url, "history": history}
+                    continue  # re-observe: overlay / next stage / next step / next task
+                result = {"status": "stuck", "rule": rule["id"], subflow.history_key: sres,
                           "url": url, "history": history}
-                if mres.get("context"):
-                    result["context"] = mres["context"]
-                return result
-
-            # A challenge rule answers one decision via the answer-key library, then
-            # yields back to the outer loop, which re-observes and routes what comes
-            # next — a success overlay to dismiss, the fix stage, or the next activity.
-            if _is_challenge_action(rule["do"]):
-                cres = self._drive_challenge(payload, auto)
-                history.append({"rule": rule["id"], "from": matched, "challenge": cres})
-                if cres.get("status") == "solved":
-                    getattr(self, rule["id"])()  # advance the flow model past this decision
-                    continue                      # re-observe: overlay / next stage / next task
-                result = {"status": "stuck", "rule": rule["id"], "challenge": cres,
-                          "url": url, "history": history}
-                if cres.get("context"):
-                    result["context"] = cres["context"]
-                return result
-
-            # A coding-lab rule solves one step via the answer-key library, then yields
-            # back to the outer loop, which re-observes and routes what comes next — the
-            # next step (still scw-coding-lab) or the completion screen.
-            if _is_coding_lab_action(rule["do"]):
-                lres = self._drive_coding_lab(payload, auto)
-                history.append({"rule": rule["id"], "from": matched, "coding_lab": lres})
-                if lres.get("status") in ("solved", "coding-lab-done"):
-                    getattr(self, rule["id"])()  # advance the flow model past this step
-                    continue                      # re-observe: next step / completion screen
-                result = {"status": "stuck", "rule": rule["id"], "coding_lab": lres,
-                          "url": url, "history": history}
-                if lres.get("context"):
-                    result["context"] = lres["context"]
+                if sres.get("context"):
+                    result["context"] = sres["context"]
                 return result
 
             self._do_action(rule["do"], payload)

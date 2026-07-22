@@ -23,13 +23,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trainee_sim.server.capture import Capture
-from trainee_sim.server.config import SETTINGS
-from trainee_sim.server.recorder import NetworkRecorder
+from webwalk.server.capture import Capture
+from webwalk.server.config import SETTINGS
+from webwalk.server.recorder import NetworkRecorder
 
 if TYPE_CHECKING:
     from selenium.webdriver.remote.webdriver import WebDriver
@@ -184,14 +185,14 @@ class BrowserSession:
                 "instructions": (
                     "Browser opened on the server machine. Complete any login/MFA and load "
                     "the training material directly in that window. Telemetry is OFF — nothing "
-                    "is being observed. Run `trainee-sim telemetry on` once you're past auth "
+                    "is being observed. Run `telemetry on` once you're past auth "
                     "and ready to start capturing."
                 ),
             }
 
     def _require(self) -> WebDriver:
         if self._driver is None:
-            raise NotConnected("No browser session. Run `trainee-sim connect` first.")
+            raise NotConnected("No browser session. Run `connect` first.")
         return self._driver
 
     def _focus_live_window(self, driver: WebDriver) -> bool:
@@ -230,7 +231,7 @@ class BrowserSession:
         driver = self._require()
         if not await asyncio.to_thread(self._focus_live_window, driver):
             await self.shutdown()
-            raise NotConnected("The browser was closed. Run `trainee-sim connect` to reopen it.")
+            raise NotConnected("The browser was closed. Run `connect` to reopen it.")
         return driver
 
     async def status(self) -> dict[str, Any]:
@@ -593,17 +594,13 @@ class BrowserSession:
         frames: list[dict[str, Any]] = []
         self._collect_elements(driver, [], elements, frames, depth=0)
         driver.switch_to.default_content()
-        # If a code-editor challenge is on the page, fold its choice-focused view
-        # (stage, options, source) into the snapshot so a solve rule gets the
-        # decision for free. Best-effort — a page without an editor yields None
-        # and never blocks a normal observe.
-        challenge: dict[str, Any] | None = None
-        try:
-            view = self._challenge_sync(driver)
-            if view.get("stage") not in (None, "none"):
-                challenge = view
-        except Exception as exc:
-            logger.debug("challenge_extract_failed", error=str(exc))
+        # Fold any flow-registered snapshot extensions into the capture — e.g. SCW's
+        # code-editor challenge decision view (see webwalk/server/plugins.py). Each
+        # is best-effort and keyed; a bare (flow-agnostic) server adds nothing here.
+        from webwalk.server.plugins import collect_snapshot_extensions
+
+        extra = collect_snapshot_extensions(driver)
+        driver.switch_to.default_content()  # extensions may have changed frame focus
         # Pump the network recorder and hand this step the traffic since the last
         # snapshot. Empty while telemetry is off (the recorder ignores it). Frame
         # focus is irrelevant here — CDP Network events are per-target.
@@ -613,7 +610,6 @@ class BrowserSession:
             "title": driver.title,
             "elements": elements,
             "frames": frames,  # nested-frame map + each frame's visible text
-            "challenge": challenge,  # choice-focused editor view, or None
             "dom": driver.page_source,  # top document only (frame text is in `frames`)
             "network": self.network.drain(),  # API traffic this step produced
             # Record the whole window set with each step, so a capture shows what
@@ -621,6 +617,7 @@ class BrowserSession:
             # focus-free enumeration — switching into each tab here would flicker
             # the headed browser on every observe (see _list_windows_light).
             "windows": self._list_windows_light(driver),
+            **extra,  # flow-contributed snapshot keys (e.g. `challenge`), if any
         }
 
     async def snapshot(self) -> dict[str, Any]:
@@ -1063,25 +1060,18 @@ class BrowserSession:
         result = await asyncio.to_thread(self._eval_sync, driver, script, args or [], self._parse_frame(frame))
         return {"result": result}
 
-    # --- challenge extraction (the choice-focused editor view) ---
+    # --- flow extraction hook ---
     #
-    # An SCW challenge is a decision among fixed options. `challenge` scrapes the
-    # code editor + its controls into that decision (stage, enumerated choices
-    # each with a ready-to-fire action, source as context) so the engine picks
-    # rather than re-reading the UI. Pure shaping lives in engine/challenge.py;
-    # this just runs the scraper and hands it over. See the design doc.
+    # The generic escape hatch a flow endpoint uses to read the live page with a
+    # custom scraper — e.g. SCW's /challenge, which runs the code-editor scraper on
+    # demand (see webwalk/flows/scw/observers.py). The core session stays flow-
+    # agnostic: it just runs the supplied function against the driver off-thread.
 
-    def _challenge_sync(self, driver: WebDriver) -> dict[str, Any]:
-        from trainee_sim.engine.challenge import CHALLENGE_JS, assemble
-
-        driver.switch_to.default_content()  # the scraper walks frames itself
-        raw = driver.execute_script(CHALLENGE_JS) or {"editor": None}
-        return assemble(raw)
-
-    async def challenge(self) -> dict[str, Any]:
-        """Read the current challenge as a decision view (see engine/challenge)."""
+    async def extract(self, extractor: Callable[[WebDriver], Any]) -> Any:
+        """Run a flow-supplied `extractor(driver)` against the live page and return
+        its result. Selenium is synchronous, so it runs in a worker thread."""
         driver = await self._ready()
-        return await asyncio.to_thread(self._challenge_sync, driver)
+        return await asyncio.to_thread(extractor, driver)
 
     async def act(
         self,

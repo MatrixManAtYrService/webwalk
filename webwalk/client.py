@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from trainee_sim.constants import DEFAULT_SERVER_URL
+from webwalk.constants import DEFAULT_SERVER_URL
 
 # Connecting the browser can take a while (Selenium Manager may download a
 # driver on first use); keep a generous default timeout.
@@ -47,8 +47,9 @@ def server_request(
         resp = httpx.request(method, url, json=json, params=params, timeout=timeout)
     except httpx.ConnectError as exc:
         raise ServerUnreachable(
-            "Could not reach the trainee-sim server. Start it with `trainee-sim serve` on the "
-            f"target machine, and set TS_SERVER_URL if it isn't at {get_server_url()}."
+            "Could not reach the webwalk server. Start it with `webwalk serve` (or a flow CLI's "
+            f"`serve`, e.g. `scw-sim serve`) on the target machine, and set TS_SERVER_URL if it "
+            f"isn't at {get_server_url()}."
         ) from exc
 
     if resp.status_code == 499:

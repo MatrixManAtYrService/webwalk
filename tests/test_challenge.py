@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trainee_sim.engine.challenge import assemble, match_challenge
+from webwalk.flows.scw.challenge import assemble, match_challenge
 
 # --- fixtures: raw scraper output, verbatim shape ---
 

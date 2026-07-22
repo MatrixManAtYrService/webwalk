@@ -13,9 +13,9 @@ from typing import Any
 
 import yaml
 
-from trainee_sim.engine.mission import match_step
+from webwalk.flows.scw.mission import match_step
 
-STEPS: list[dict[str, Any]] = yaml.safe_load(Path("courses/missions.yaml").read_text())["steps"]
+STEPS: list[dict[str, Any]] = yaml.safe_load(Path("webwalk/flows/scw/data/missions.yaml").read_text())["steps"]
 
 # The real vb-52 playbook (from `trainee-sim mission` live), verbatim.
 S0_ALICE = {"order": 0, "title": "Log in as Alice",

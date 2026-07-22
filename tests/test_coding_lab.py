@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trainee_sim.engine.coding_lab import (
+from webwalk.flows.scw.coding_lab import (
     EDITOR_FRAME,
     EDITOR_SELECTOR,
     SUBMIT_FRAME,

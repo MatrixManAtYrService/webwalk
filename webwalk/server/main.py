@@ -18,15 +18,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from trainee_sim.server.config import SETTINGS
-from trainee_sim.server.session import SESSION, ActionFailed, NotConnected
+from webwalk.server.config import SETTINGS
+from webwalk.server.plugins import flow_router, load_server_plugins
+from webwalk.server.session import SESSION, ActionFailed, NotConnected
 
 logger = structlog.get_logger()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    from trainee_sim.server.logging import setup_logging
+    from webwalk.server.logging import setup_logging
 
     setup_logging()
     SETTINGS.ensure_dirs()
@@ -37,7 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="trainee-sim-server",
+    title="webwalk-server",
     description="Drives a Selenium browser through training material via a live, server-resident session.",
     lifespan=lifespan,
 )
@@ -51,7 +52,7 @@ async def _not_connected(request: Request, exc: NotConnected) -> JSONResponse:
         content={
             "error": "not_connected",
             "message": str(exc),
-            "instructions": "Run `trainee-sim connect` to open the browser first.",
+            "instructions": "Run `connect` to open the browser first.",
         },
     )
 
@@ -235,16 +236,6 @@ async def eval_endpoint(body: EvalBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
-@app.get("/challenge")
-async def challenge() -> dict[str, Any]:
-    """The current SCW challenge as a decision: stage, options, source context.
-
-    Reads the code editor + its controls into `{stage, options, submit, …}` (see
-    engine/challenge.py). `stage: "none"` when no code editor is on the page.
-    """
-    return await SESSION.challenge()
-
-
 @app.get("/network")
 async def network(since: float | None = None) -> dict[str, Any]:
     """Debug view of the network recorder: state + currently buffered events.
@@ -270,3 +261,13 @@ async def wait(body: WaitBody) -> dict[str, Any]:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+# --- flow plugins ---
+#
+# Load any flow-selected server plugins (WEBWALK_SERVER_PLUGINS) so they can
+# register snapshot extensions + routes, then mount their routes. Done at import
+# time so it applies under both `serve` and uvicorn's `--reload` worker. A bare,
+# flow-agnostic server loads nothing and mounts an empty router.
+load_server_plugins()
+app.include_router(flow_router)
