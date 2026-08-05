@@ -2,7 +2,7 @@
 
 The server runs on the *target* machine (the one with the Selenium browser and
 access to the training material). The client runs elsewhere on the LAN and
-reaches the server via TS_SERVER_URL. Everything the browser touches is
+reaches the server via WW_SERVER. Everything the browser touches is
 configured here, but deliberately kept minimal — the interesting behaviour
 (what to observe, which actions to take) is discovered by driving the browser,
 not hardcoded.

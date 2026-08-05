@@ -2,7 +2,7 @@
 
 The CLI is stateless: each invocation makes one HTTP request. The live browser
 session lives only in the server, which typically runs on another machine on
-the LAN — set TS_SERVER_URL to point at it (default http://localhost:22133).
+the LAN — set WW_SERVER to point at it (default http://localhost:22133).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ DEFAULT_TIMEOUT = 120.0
 
 
 def get_server_url() -> str:
-    return os.environ.get("TS_SERVER_URL", DEFAULT_SERVER_URL).rstrip("/")
+    return os.environ.get("WW_SERVER", DEFAULT_SERVER_URL).rstrip("/")
 
 
 class ServerUnreachable(RuntimeError):
@@ -48,7 +48,7 @@ def server_request(
     except httpx.ConnectError as exc:
         raise ServerUnreachable(
             "Could not reach the webwalk server. Start it with `webwalk serve` (or a flow CLI's "
-            f"`serve`, e.g. `scw-sim serve`) on the target machine, and set TS_SERVER_URL if it "
+            f"`serve`, e.g. `scw-sim serve`) on the target machine, and set WW_SERVER if it "
             f"isn't at {get_server_url()}."
         ) from exc
 

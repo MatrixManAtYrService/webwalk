@@ -1,7 +1,7 @@
 """Helpers shared by every CLI (the core `webwalk` and each flow's `*-sim`).
 
 The CLIs are stateless: each command makes one HTTP request to the server
-(TS_SERVER_URL) and prints the result. These are the request plumbing (`_call`,
+(WW_SERVER) and prints the result. These are the request plumbing (`_call`,
 `_request`, `_request_capturing`), the local capture/network writers, and the
 compact `--brief` renderers — all flow-agnostic, so a flow CLI reuses them
 verbatim and only adds its own flow-specific commands on top.

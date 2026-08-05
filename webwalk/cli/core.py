@@ -7,7 +7,7 @@ about any particular training — a flow CLI (e.g. `scw-sim`) registers these sa
 verbs via `register_core_commands` and adds its own flow-specific commands on top.
 
 The bare `webwalk` command exposes exactly these, with a flow-agnostic server
-(no snapshot extensions). Point at the server with TS_SERVER_URL.
+(no snapshot extensions). Point at the server with WW_SERVER.
 """
 
 from __future__ import annotations

@@ -26,7 +26,7 @@ template to copy for the next one.
   It owns a single long-lived Chrome (a **persistent profile**, so the logged-in
   session survives restarts). One process, all live state in memory.
 - The **CLIs** are stateless: one HTTP request per invocation. They run anywhere
-  on the LAN and find the server via `TS_SERVER_URL`.
+  on the LAN and find the server via `WW_SERVER`.
 - The core is **flow-agnostic**. A flow extends it two ways: **sub-flows** in the
   engine (a "one level down" activity like a mission's step checklist) and
   **server plugins** (a snapshot observer + endpoints, e.g. SCW's challenge
@@ -67,7 +67,7 @@ before it has any rules.
 uv run scw-sim serve                             # binds 0.0.0.0:22133, loads the SCW plugin
 
 # on your machine
-export TS_SERVER_URL=http://<target-host>:22133
+export WW_SERVER=http://<target-host>:22133
 uv run scw-sim check                             # {"healthy": true}
 uv run scw-sim connect https://…                 # opens the browser on the target
 #   … complete login/MFA by hand in that window …
@@ -179,7 +179,7 @@ Env vars keep the `TS_` prefix for continuity (they predate the rename). Key one
 
 | Env var | Meaning | Default |
 |---|---|---|
-| `TS_SERVER_URL` | Where the CLI finds the server | `http://localhost:22133` |
+| `WW_SERVER` | Where the CLI finds the server | `http://localhost:22133` |
 | `WEBWALK_SERVER_PLUGINS` | Comma-sep flow server-plugin modules the server loads | *(set by each flow's `serve`)* |
 | `TS_WEBDRIVER_URL` | Remote WebDriver / Grid endpoint; empty = local Chrome | *(empty)* |
 | `TS_START_URL` | URL `connect` opens by default | `about:blank` |

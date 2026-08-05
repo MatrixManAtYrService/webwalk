@@ -24,6 +24,8 @@ dev = [
 [project.scripts]
 webwalk = "webwalk.cli.core:main"
 scw-sim = "webwalk.flows.scw.cli:main"
+github-tempo = "webwalk.flows.github_tempo.cli:main"
+grafana-sim = "webwalk.flows.grafana.cli:main"
 # A template flow (webwalk/flows/example) — copy it to start a new one.
 example-sim = "webwalk.flows.example.cli:main"
 
@@ -40,6 +42,9 @@ packages = ["webwalk"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Prepend the project root so tests import the source tree directly, regardless of
+# how pytest is launched (`uv run pytest` vs `python -m pytest`).
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 120
