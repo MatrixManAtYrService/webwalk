@@ -23,6 +23,7 @@ import datetime as dt
 import json
 import os
 import re
+import urllib.parse
 from typing import Any
 
 from webwalk.cli._shared import _call
@@ -60,8 +61,30 @@ def _body(result: dict[str, Any]) -> Any:
         return b
 
 
+# The one browser is shared by both hosts, so we track where it is: a fetch is
+# issued *from the current page* and a cross-origin one dies on CORS with
+# `status: 0` / "Failed to fetch", which the callers would read as an empty
+# result. Anything talking to a host parks the browser there first.
+_current_origin: str | None = None
+
+
+def _origin_of(url: str) -> str:
+    return urllib.parse.urlsplit(url).netloc
+
+
+def _ensure_origin(host: str) -> None:
+    """Park the browser on `host` so a page_fetch to it is same-origin."""
+    global _current_origin
+    if _current_origin is None:
+        state = (_call("/observe", json={"label": "origin-check"}).get("record") or {}).get("state") or {}
+        _current_origin = _origin_of(state.get("url") or "")
+    if _current_origin != host:
+        navigate(f"https://{host}/", settle=1.0)
+
+
 def page_fetch(url: str, method: str = "GET", body: Any = None, page_auth: bool = False) -> dict[str, Any]:
     """Fire a request from inside the logged-in page (carries its session)."""
+    _ensure_origin(_origin_of(url))
     return _call("/fetch", json={
         "url": url, "method": method,
         "headers": {"Content-Type": "application/json"} if body is not None else None,
@@ -72,7 +95,9 @@ def page_fetch(url: str, method: str = "GET", body: Any = None, page_auth: bool 
 
 def navigate(url: str, settle: float = 2.0) -> None:
     """Point the browser at a URL and let a SPA render before we read it."""
+    global _current_origin
     _call("/step", json={"action": "navigate", "value": url, "settle": settle})
+    _current_origin = _origin_of(url)
 
 
 def eval_js(script: str) -> Any:
@@ -100,8 +125,6 @@ def collect_prs(since: str, max_pages: int = 40) -> list[dict[str, Any]]:
     the DOM rather than the API), then fetches each PR's HTML and pulls the Jira
     key(s) out of the description links. PRs with no tracked-project key are dropped.
     """
-    import urllib.parse
-
     q = f"is:pr author:{GH_USER} is:merged merged:>={since}"
     seen: list[str] = []
     for page in range(1, max_pages + 1):

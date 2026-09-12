@@ -6,12 +6,12 @@
 # remembered and this whole script no-ops straight to the dashboard.
 #
 # Run it against a server you've already started (WW_SERVER points the CLI at it):
-#   $env.WW_SERVER = "http://192.168.90.126:22133"
+#   $env.WW_SERVER = "http://192.168.90.107:22133"
 #   nu webwalk/flows/github_tempo/login.nu
 
 # Where the CLI finds the running server. Leave your own value if already set.
 if "WW_SERVER" not-in $env {
-    $env.WW_SERVER = "http://192.168.90.126:22133"
+    $env.WW_SERVER = "http://192.168.90.107:22133"
 }
 
 # Who we're logging in as. Prepopulated into the GitHub sign-in form's username
@@ -40,9 +40,9 @@ uv run github-tempo connect https://github.corp.clover.com/login
 # --- Path A: GitHub Enterprise built-in form (username + password on one page) ---
 # Prepopulate the username, then fill the password and submit. Wrapped in `try`
 # so the SSO-redirect path (Path B) can take over when the form isn't shown.
-# NOTE: these selectors are GHE defaults (#login_field / #password / the "Sign in"
-# submit). Verify them on the next COLD login — this session was already
-# authenticated when the script was authored, so the form couldn't be observed.
+# NOTE: verified on a cold login 2026-09-11 — corp GitHub serves its own
+# "Sign in via LDAP" form (input#login_field / input#password / the commit
+# submit) and does NOT delegate to Azure AD, so Path B below just falls through.
 try {
     uv run github-tempo wait-for --element "input#login_field" --timeout 8
     uv run github-tempo type $env.GH_USER --into "input#login_field"
@@ -87,7 +87,7 @@ try {
 # Both paths converge on the authenticated dashboard. Gate on a visible element
 # that only exists when logged in (the global "Create something new" button);
 # generous timeout covers a manual MFA entry.
-uv run github-tempo wait-for --element "button#global-create-menu-button" --timeout 180
+uv run github-tempo wait-for --element "button#global-create-menu-anchor" --timeout 180
 print ""
 print $"  Signed in to corp GitHub as ($env.GH_USER)."
 
@@ -96,11 +96,17 @@ print $"  Signed in to corp GitHub as ($env.GH_USER)."
 # login form. Prepopulate the username, fill the password, submit. A remembered
 # profile skips straight to Tempo and the form probe just falls through.
 uv run github-tempo step navigate --value "https://jira.corp.clover.com/secure/Tempo.jspa#/my-work/week?type=LIST"
+# A cold session lands on login.jsp, which now shows a chooser ("Continue with
+# username and password" / "Continue with SSO") instead of the form itself.
+# `?native_login=` skips the chooser; a warm session never enters this branch.
 try {
-    uv run github-tempo wait-for --element "input#login-form-username" --timeout 8
+    uv run github-tempo wait-for --url "login.jsp" --timeout 8
+    uv run github-tempo step navigate --value "https://jira.corp.clover.com/login.jsp?native_login="
+    uv run github-tempo wait-for --element "input#login-form-username" --timeout 15
     uv run github-tempo type $env.JIRA_USER --into "input#login-form-username"
     uv run github-tempo type --into "input#login-form-password" --env JIRA_PASSWORD --secret
     uv run github-tempo click --element "#login-form-submit"
+    uv run github-tempo step navigate --value "https://jira.corp.clover.com/secure/Tempo.jspa#/my-work/week?type=LIST"
 }
 # Converge on Tempo (generous timeout covers any SSO/MFA redirects).
 uv run github-tempo wait-for --url "Tempo.jspa" --timeout 180
