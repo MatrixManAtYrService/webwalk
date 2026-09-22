@@ -467,9 +467,17 @@ def build_app(help_text: str, server_plugins: str = "") -> typer.Typer:
 app = build_app(
     "webwalk — drive a Selenium browser and capture the flow (flow-agnostic core).\n\n"
     "Start `webwalk serve` on the target machine, then `connect`, do auth by hand, "
-    "`telemetry on`, and capture with `observe` / `step`. For a specific training "
-    "flow, use its own CLI (e.g. `scw-sim`), which adds a `run` walker on top."
+    "`telemetry on`, and capture with `observe` / `step`. Point `--flow <id|path>` "
+    "at a flow to `where` / `run` / `graph` it; a flow with its own CLI (e.g. "
+    "`scw-sim`) adds flow-specific verbs on top."
 )
+
+# The bare core also gets flow-parameterized verbs: `webwalk --flow <id|path> run`.
+# Imported at the bottom to avoid a cycle (webwalk.flow imports the walk plumbing,
+# not this module's app).
+from webwalk.flow import add_generic_flow_commands  # noqa: E402
+
+add_generic_flow_commands(app)
 
 
 def main() -> None:

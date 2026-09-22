@@ -29,6 +29,11 @@ grafana-sim = "webwalk.flows.grafana.cli:main"
 # A template flow (webwalk/flows/example) — copy it to start a new one.
 example-sim = "webwalk.flows.example.cli:main"
 
+# Flows discoverable via `webwalk --flow <id>` once installed. An external flow
+# repo registers its own `Flow` under this same group (see ww-kg-clover).
+[project.entry-points."webwalk.flows"]
+scw = "webwalk.flows.scw:FLOW"
+
 #[[tool.uv.index]]
 #url = "https://nexus.corp.clover.com/repository/libs-python-local-group/simple"
 #default = true

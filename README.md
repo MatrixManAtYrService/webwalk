@@ -50,15 +50,42 @@ before it has any rules.
 
 ### Adding a flow
 
-1. `cp -r webwalk/flows/example webwalk/flows/<yourflow>` and rename it.
-2. Author `data/states.yaml` — state signatures + rules — by driving the browser
-   (`connect`, `observe --brief`, then encode what you did as a rule).
-3. Add a `<yourflow>-sim` console script in `pyproject.toml` →
-   `webwalk.flows.<yourflow>.cli:main`.
-4. Optional: a `SubFlow` (engine/subflow.py) for a repeated "one level down"
-   activity, and/or an `observers.py` server plugin for a custom snapshot scraper
-   (pass `server_plugins=` to `build_app`). SCW (`webwalk/flows/scw/`) is the
-   worked example of both.
+A flow is described by a **`flow.yaml` manifest** naming its knowledge (data
+files) and, optionally, its code plugins (dotted paths). It can live **in a
+separate repo** with webwalk as a dependency — the tool and the site-knowledge
+stay apart (modeled on `../knowledge-graph-editor` / its demo repo). See
+`webwalk/flow.py` and the `../ww-kg-clover` worked example.
+
+- **Pure-data flow** — a `flow.yaml` + `data/states.yaml`, no Python. webwalk's
+  generic verbs (`where` / `run` / `graph`) work over it directly:
+
+  ```bash
+  webwalk --flow ./path/to/flow run       # or `--flow <id>` once installed
+  ```
+
+- **Code flow** — the manifest also names plugins (a `SubFlow` factory, an
+  `observers.py` server plugin, extra CLI verbs). Ship it as its own repo:
+  1. `flow.yaml` (`id`, `data:`, and a `plugins:` block).
+  2. `pyproject.toml` depending on `webwalk` (via `[tool.uv.sources]`), a
+     `<flow>-sim` console script → `run_flow_cli(FLOW)`, and a `webwalk.flows`
+     entry point so `webwalk --flow <id>` finds it.
+  3. Author `data/states.yaml` by driving the browser (`connect`,
+     `observe --brief`, then encode what you did as a rule).
+
+  SCW (`webwalk/flows/scw/`, exposed as `FLOW`) is the worked example of both the
+  sub-flow factory and the server plugin; `../ww-kg-clover` reuses those mechanics
+  from an external repo while owning the knowledge.
+
+### Knowledge-graph capture
+
+`<cli> graph` (or `webwalk --flow <id> graph`) projects the flow's states + rules
+into the on-disk format the sibling **knowledge-graph-editor** (kge) reads —
+`schema.json` / `nodes.json` / `edges.json` under `graphs/<flow>/`. That's the
+**acquisition graph** ("where to find it"): a `page` node per state, a
+`NAVIGATES_TO`/`DISCOVERS` edge per rule. Open it in kge to add the **semantic
+layer** ("what it is") — a different node/edge *family*, so re-running `graph`
+after another walk rewrites only the acquisition layer and **preserves your
+curated semantics**. See `webwalk/graph/`.
 
 ## Quick start (SCW)
 
