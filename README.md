@@ -196,9 +196,11 @@ end. See `docs/rule-runner-design.md` and the follow-on `docs/*-design.md`.
 
 ## Command reference
 
-Core verbs (on every CLI): `serve`, `check`, `connect`, `telemetry on|off`,
-`status`, `windows`/`switch`, `observe [--save|--brief]`, `network`, `step`,
-`click`, `type`, `paste`, `wait-for`, `fetch`, `eval`, `shutdown`. Actions share
+Core verbs (on every CLI): `onboarding` (read first — how to capture a flow as a
+graph), `serve`, `check`, `connect`, `telemetry on|off`, `status`,
+`windows`/`switch`, `observe [--save|--brief]`, `network`, `step`, `click`,
+`type`, `paste`, `wait-for`, `fetch`, `eval`, `shutdown`. Plus the flow verbs
+`where` / `run` / `graph` (take `--flow <id|dir>` on the bare `webwalk`). Actions share
 `--window`, `--frame`, `--by css|xpath`, `--settle`, `--wait-after[/-timeout]`,
 `--save`.
 
