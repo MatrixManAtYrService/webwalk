@@ -51,7 +51,7 @@ import typer
 
 from webwalk.cli._walk import execute_walk, load_course, make_callbacks
 from webwalk.engine.matcher import match_states
-from webwalk.graph import states_to_graph, write_kge_graph
+from webwalk.graph import model_to_graph, states_to_graph, write_kge_graph
 
 if TYPE_CHECKING:
     from webwalk.cli._walk import WalkCallbacks
@@ -239,11 +239,21 @@ def do_run(flow: Flow, *, to: str = "", window: str = "", once: bool = False,
 
 
 def do_graph(flow: Flow, out: str = "") -> None:
-    """Generate/refresh the flow's kge-format acquisition graph (states + rules)."""
+    """Generate/refresh the flow's kge graph: the state layer (navigation) plus,
+    if the flow ships a `data/model.yaml`, the data-model layer (endpoints +
+    entities). Each layer clobbers only its own node/edge types, so they compose
+    in one graph and neither disturbs the other (or any curated types)."""
+    import yaml
+
     out_dir = out or f"./graphs/{flow.id}"
     state_defs, rule_defs, _ = load_course(str(flow.states_path))
-    graph = states_to_graph(flow.id, state_defs, rule_defs)
-    result = write_kge_graph(out_dir, graph)
+    result = write_kge_graph(out_dir, states_to_graph(flow.id, state_defs, rule_defs))
+
+    model_path = flow.data.get("model")
+    if model_path and Path(model_path).exists():
+        model = yaml.safe_load(Path(model_path).read_text()) or {}
+        result = write_kge_graph(out_dir, model_to_graph(flow.id, model))
+
     typer.echo(json.dumps(result, indent=2, default=str))
     typer.echo(f"Serve it with:  kge serve   (from {Path(out_dir).parent})", err=True)
 

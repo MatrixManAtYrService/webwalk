@@ -20,7 +20,7 @@ from webwalk.cli.core import build_app, register_core_commands
 from webwalk.engine.matcher import match_states
 from webwalk.engine.subflow import SubFlow
 from webwalk.flow import Flow, discover, load_flow, resolve, run_flow_cli
-from webwalk.graph import states_to_graph, write_kge_graph
+from webwalk.graph import model_to_graph, states_to_graph, write_kge_graph
 from webwalk.server.plugins import flow_router, register_snapshot_extension
 
 __all__ = [
@@ -44,5 +44,6 @@ __all__ = [
     "flow_router",
     # knowledge-graph capture
     "states_to_graph",
+    "model_to_graph",
     "write_kge_graph",
 ]

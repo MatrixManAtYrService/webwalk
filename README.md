@@ -78,14 +78,19 @@ stay apart (modeled on `../knowledge-graph-editor` / its demo repo). See
 
 ### Knowledge-graph capture
 
-`<cli> graph` (or `webwalk --flow <id> graph`) projects the flow's states + rules
-into the on-disk format the sibling **knowledge-graph-editor** (kge) reads —
-`schema.json` / `nodes.json` / `edges.json` under `graphs/<flow>/`. That's the
-**acquisition graph** ("where to find it"): a `page` node per state, a
-`NAVIGATES_TO`/`DISCOVERS` edge per rule. Open it in kge to add the **semantic
-layer** ("what it is") — a different node/edge *family*, so re-running `graph`
-after another walk rewrites only the acquisition layer and **preserves your
-curated semantics**. See `webwalk/graph/`.
+`<cli> graph` (or `webwalk --flow <id> graph`) projects the flow into the on-disk
+format the sibling **knowledge-graph-editor** (kge) reads — `schema.json` /
+`nodes.json` / `edges.json` under `graphs/<flow>/` — in up to two layers:
+
+- **state layer** ("where to find it"), from `states.yaml`: a `page` node per
+  state, a `NAVIGATES_TO`/`DISCOVERS` edge per rule.
+- **data-model layer** ("what it is"), from an optional `data/model.yaml`:
+  `service`/`endpoint`/`entity` nodes and the relationships between them (the API
+  a flow talks to and the domain objects it yields). See `webwalk/graph/model.py`.
+
+Each layer clobbers only its **own** node/edge *families*, so they compose in one
+graph and re-running `graph` never disturbs the other layer — or anything you
+curate in kge (add nodes/edges of a new type and they persist). See `webwalk/graph/`.
 
 ## Quick start (SCW)
 

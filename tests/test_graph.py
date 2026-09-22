@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from webwalk.graph.kge import states_to_graph, write_kge_graph
+from webwalk.graph.model import model_to_graph
 
 STATES = [
     {"id": "home", "url_contains": "/home"},
@@ -55,6 +56,44 @@ def test_write_kge_graph_files_and_shape(tmp_path) -> None:
     # nodes sorted by id; edges sorted by (from, type, to) — clean diffs
     nodes = json.loads((tmp_path / "nodes.json").read_text())["nodes"]
     assert [n["id"] for n in nodes] == sorted(n["id"] for n in nodes)
+
+
+MODEL = {
+    "services": [{"id": "tempo", "host": "jira.example.com", "base": "/rest/tempo/4"}],
+    "endpoints": [
+        {"id": "wl-create", "service": "tempo", "method": "POST", "path": "/worklogs/", "returns": ["worklog"]},
+    ],
+    "entities": [
+        {"id": "worklog", "label": "Worklog", "attributes": ["day", "key"]},
+        {"id": "jira-issue", "label": "JiraIssue"},
+    ],
+    "edges": [{"from": "worklog", "to": "jira-issue", "type": "LOGS_AGAINST", "note": "originTaskId"}],
+}
+
+
+def test_model_to_graph_nodes_and_edges() -> None:
+    g = model_to_graph("demo", MODEL)
+    by_id = {n["id"]: n for n in g["nodes"]}
+    assert by_id["svc:tempo"]["type"] == "service"
+    assert by_id["endpoint:wl-create"]["type"] == "endpoint"
+    assert by_id["entity:worklog"]["type"] == "entity"
+    types = {(e["type"], e["from"], e["to"]) for e in g["edges"]}
+    assert ("HOSTED_BY", "endpoint:wl-create", "svc:tempo") in types
+    assert ("RETURNS", "endpoint:wl-create", "entity:worklog") in types
+    assert ("LOGS_AGAINST", "entity:worklog", "entity:jira-issue") in types
+    # every emitted edge type is declared in the schema (kge requires it)
+    assert set(g["schema"]["edgeTypes"]) >= {e["type"] for e in g["edges"]}
+
+
+def test_state_and_model_layers_compose_in_one_dir(tmp_path) -> None:
+    write_kge_graph(tmp_path, states_to_graph("demo", STATES, RULES))
+    write_kge_graph(tmp_path, model_to_graph("demo", MODEL))
+    node_types = {n["type"] for n in json.loads((tmp_path / "nodes.json").read_text())["nodes"]}
+    # both layers coexist — the model write didn't clobber the page layer
+    assert {"page", "service", "endpoint", "entity"} <= node_types
+    schema = json.loads((tmp_path / "schema.json").read_text())
+    assert {"page", "service", "endpoint", "entity"} <= set(schema["nodeTypes"])
+    assert {"NAVIGATES_TO", "HOSTED_BY", "RETURNS", "LOGS_AGAINST"} <= set(schema["edgeTypes"])
 
 
 def test_regenerate_preserves_curated_semantic_layer(tmp_path) -> None:

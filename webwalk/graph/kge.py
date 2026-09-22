@@ -151,16 +151,23 @@ def write_kge_graph(
     out_dir: str | Path,
     graph: dict[str, Any],
     *,
-    regen_node_types: frozenset[str] = GENERATED_NODE_TYPES,
-    regen_edge_types: frozenset[str] = GENERATED_EDGE_TYPES,
+    regen_node_types: frozenset[str] | None = None,
+    regen_edge_types: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """Merge `graph` (from `states_to_graph`) into a kge graph directory.
+    """Merge a projection (`states_to_graph` / `model_to_graph`) into a kge dir.
 
     Clobber is scoped by type: existing nodes/edges whose `type` is in the
-    regenerated set are replaced; every other type (i.e. curated `semantic` items)
-    is preserved. Schema types union (generated definitions win); an existing
-    `colorKey`/`colorValues` is kept so a human's color choices stick.
+    regenerated set are replaced; every other type is preserved. By default the
+    regenerated set is exactly the types this projection declares in its schema —
+    so writing the state layer leaves the model layer (and any curated types)
+    intact, and vice versa. Schema types union (this projection's definitions
+    win); an existing `colorKey`/`colorValues` is kept so a human's choices stick.
     """
+    if regen_node_types is None:
+        regen_node_types = frozenset(graph["schema"].get("nodeTypes", {}))
+    if regen_edge_types is None:
+        regen_edge_types = frozenset(graph["schema"].get("edgeTypes", {}))
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 

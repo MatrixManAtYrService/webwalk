@@ -22,5 +22,6 @@ never destroys curated knowledge (the discipline kge itself uses to keep
 from __future__ import annotations
 
 from webwalk.graph.kge import states_to_graph, write_kge_graph
+from webwalk.graph.model import model_to_graph
 
-__all__ = ["states_to_graph", "write_kge_graph"]
+__all__ = ["states_to_graph", "model_to_graph", "write_kge_graph"]
