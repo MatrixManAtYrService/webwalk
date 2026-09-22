@@ -69,3 +69,16 @@ def test_scw_discovered_via_entry_point() -> None:
     assert "scw" in flows, "the scw flow should be registered under the webwalk.flows entry point"
     assert flows["scw"].subflow_factory is not None   # code flow: has plugins
     assert flows["scw"].server_plugin == "webwalk.flows.scw.observers"
+
+
+def test_local_flow_overrides_entry_point(tmp_path, monkeypatch) -> None:
+    # A repo-local flow named 'scw' must shadow webwalk's bundled scw entry point —
+    # the "keep separate endeavors separate" rule (local repo intent wins).
+    d = tmp_path / "flows" / "scw"
+    (d / "data").mkdir(parents=True)
+    (d / "data" / "states.yaml").write_text(STATES)
+    (d / "flow.yaml").write_text("id: scw\ndata:\n  states: data/states.yaml\n")
+    monkeypatch.chdir(tmp_path)
+    flows = discover()
+    assert flows["scw"].root == d               # the local one, not the entry point
+    assert flows["scw"].subflow_factory is None  # local is pure-data (bundled has plugins)

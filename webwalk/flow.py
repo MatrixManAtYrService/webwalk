@@ -150,11 +150,16 @@ def _scan_dir_for_flows(base: Path) -> dict[str, Flow]:
 def discover() -> dict[str, Flow]:
     """All flows visible right now: installed (entry points) + on-disk (path scan).
 
-    Entry points win over path-discovered flows of the same id. Path roots come
-    from `WEBWALK_FLOWS` (`:`/`,`-separated) and the current directory (`./flow.yaml`
-    and `./flows/*/flow.yaml`).
+    **Local wins.** A flow discovered on disk overrides an installed (entry-point)
+    flow of the same id — so a knowledge repo's own `./flows/<id>/flow.yaml` takes
+    precedence over a bundled flow webwalk happens to ship (e.g. a repo's local
+    `scw` shadows webwalk's batteries-included `scw`). This is what keeps separate
+    endeavors separate: the repo you're standing in expresses intent. Path roots
+    come from `WEBWALK_FLOWS` (`:`/`,`-separated), then the current directory
+    (`./flow.yaml` and `./flows/*/flow.yaml`); later roots override earlier ones.
     """
     flows: dict[str, Flow] = {}
+    # Installed flows first (lowest precedence).
     for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP):
         try:
             obj = ep.load()
@@ -162,8 +167,9 @@ def discover() -> dict[str, Flow]:
             continue
         flow = obj() if callable(obj) and not isinstance(obj, type) else obj
         if isinstance(flow, Flow):
-            flows.setdefault(ep.name, flow)
+            flows[ep.name] = flow
 
+    # On-disk flows override — local repo intent beats a globally-installed flow.
     roots: list[Path] = []
     raw = os.environ.get("WEBWALK_FLOWS", "")
     roots += [Path(r) for r in raw.replace(",", ":").split(":") if r.strip()]
@@ -171,7 +177,7 @@ def discover() -> dict[str, Flow]:
     for base in roots:
         if base.is_dir():
             for fid, flow in _scan_dir_for_flows(base).items():
-                flows.setdefault(fid, flow)
+                flows[fid] = flow
     return flows
 
 
