@@ -78,9 +78,13 @@ def make_callbacks(window: str = "") -> WalkCallbacks:
     return WalkCallbacks(observe, act, http, eval_js, confirm)
 
 
-def load_course(states: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str] | None]:
+def load_course(
+    states: str, *, require_rules: bool = True
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str] | None]:
     """Read a flow's states file into (state_defs, rule_defs, api_hosts). Exits with
-    a friendly message on a missing file or an empty `rules:` block."""
+    a friendly message on a missing file, or (when `require_rules`) an empty `rules:`
+    block. `graph` passes `require_rules=False` — states are graphable before any
+    transitions exist, so a freshly scaffolded flow can still emit its state nodes."""
     import yaml
 
     states_path = Path(states)
@@ -89,7 +93,7 @@ def load_course(states: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
         raise typer.Exit(1)
     doc = yaml.safe_load(states_path.read_text()) or {}
     rule_defs = doc.get("rules", [])
-    if not rule_defs:
+    if require_rules and not rule_defs:
         typer.echo(f"No rules in {states_path} — add a `rules:` block.", err=True)
         raise typer.Exit(1)
     return doc.get("states", []), rule_defs, doc.get("api_hosts")

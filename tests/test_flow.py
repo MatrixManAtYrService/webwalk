@@ -64,6 +64,20 @@ def test_do_graph_writes_kge_files(tmp_path) -> None:
     assert any(n["id"] == "page:home" for n in nodes)
 
 
+def test_do_graph_works_without_rules(tmp_path) -> None:
+    # A freshly scaffolded flow has states but no `rules:` yet — `graph` should
+    # still emit the state nodes rather than erroring.
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "states.yaml").write_text("states:\n  - id: home\n    url_contains: example.edu\n")
+    (tmp_path / "flow.yaml").write_text("id: scaffold\ndata:\n  states: data/states.yaml\n")
+    flow = load_flow(tmp_path)
+    out = tmp_path / "graphs" / "scaffold"
+    do_graph(flow, str(out))
+    nodes = json.loads((out / "nodes.json").read_text())["nodes"]
+    assert any(n["id"] == "page:home" for n in nodes)
+    assert json.loads((out / "edges.json").read_text())["edges"] == []
+
+
 def test_scw_discovered_via_entry_point() -> None:
     flows = discover()
     assert "scw" in flows, "the scw flow should be registered under the webwalk.flows entry point"

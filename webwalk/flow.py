@@ -246,7 +246,8 @@ def do_graph(flow: Flow, out: str = "") -> None:
     import yaml
 
     out_dir = out or f"./graphs/{flow.id}"
-    state_defs, rule_defs, _ = load_course(str(flow.states_path))
+    # A scaffolded flow may have states but no rules yet — still graph the states.
+    state_defs, rule_defs, _ = load_course(str(flow.states_path), require_rules=False)
     result = write_kge_graph(out_dir, states_to_graph(flow.id, state_defs, rule_defs))
 
     model_path = flow.data.get("model")
