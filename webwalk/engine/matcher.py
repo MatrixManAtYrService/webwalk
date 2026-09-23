@@ -25,22 +25,49 @@ def _norm(s: str | None) -> str:
     return " ".join((s or "").split())
 
 
+# The element-predicate fields `element_matches` enforces, grouped by how each
+# compares. These constants ARE the matcher's behaviour AND the single source the
+# `reference` command documents — change them here and both stay in sync.
+_EXACT_FIELDS = ("tag", "type", "id", "name")                      # predicate == element attr, exact
+_SUBSTR_FIELDS = {"aria_contains": "aria_label", "href_contains": "href"}  # case-insensitive substring
+
+# field -> one-line description, for `<cli> reference` (order is the display order).
+ELEMENT_PREDICATE_FIELDS: dict[str, str] = {
+    "frame": "exact frame path list, e.g. [0] or [3, 1]; [] = top document",
+    "tag": "exact tag name (a, button, input, select, textarea, …)",
+    "type": "exact input type",
+    "id": "exact element id",
+    "name": "exact name attribute",
+    "text": "exact visible text (whitespace-normalized)",
+    "text_contains": "case-insensitive substring of the visible text",
+    "aria_contains": "case-insensitive substring of the aria-label",
+    "href_contains": "case-insensitive substring of the href",
+}
+
+STATE_SIGNATURE_FIELDS: dict[str, str] = {
+    "id": "the state id (required, unique)",
+    "url_contains": "substring the page URL must contain",
+    "title_contains": "substring the page <title> must contain",
+    "terminal": "true → a legitimate endpoint; the walk may stop here (default false)",
+    "elements": "list of element predicates; EACH must match SOME captured element",
+}
+
+
 def element_matches(pred: dict[str, Any], el: dict[str, Any]) -> bool:
     """True if a single captured element satisfies every field in `pred`."""
     if "frame" in pred and el.get("frame") != pred["frame"]:
         return False
-    for key in ("tag", "type", "id", "name"):
+    for key in _EXACT_FIELDS:
         if key in pred and (el.get(key) or "") != pred[key]:
             return False
     if "text" in pred and _norm(el.get("text")) != _norm(pred["text"]):
         return False
-    if "text_contains" in pred and _norm(pred["text_contains"]).lower() not in _norm(el.get("text")).lower():
+    if "text_contains" in pred and _norm(str(pred["text_contains"])).lower() not in _norm(el.get("text")).lower():
         return False
-    if "aria_contains" in pred and str(pred["aria_contains"]).lower() not in (el.get("aria_label") or "").lower():
-        return False
-    return not (
-        "href_contains" in pred and str(pred["href_contains"]).lower() not in (el.get("href") or "").lower()
-    )
+    for key, attr in _SUBSTR_FIELDS.items():
+        if key in pred and str(pred[key]).lower() not in (el.get(attr) or "").lower():
+            return False
+    return True
 
 
 def explain_state(sig: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:

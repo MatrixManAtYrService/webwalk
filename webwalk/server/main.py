@@ -219,6 +219,17 @@ async def fetch(body: FetchBody) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
+@app.get("/cookies")
+async def cookies() -> dict[str, Any]:
+    """Return the live browser's cookies (incl. HttpOnly).
+
+    For out-of-band, server-side downloads: an in-page `fetch` of a file link is
+    CORS-blocked when the LMS redirects to a cross-origin signed-storage host, so
+    a caller replays the download from the server with these cookies instead.
+    """
+    return {"cookies": await SESSION.get_cookies()}
+
+
 class EvalBody(BaseModel):
     script: str
     args: list[Any] | None = None

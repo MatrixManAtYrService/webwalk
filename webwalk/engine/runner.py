@@ -63,6 +63,51 @@ HttpFn = Callable[[str, str, dict[str, str], str | None], dict[str, Any]]  # (me
 EvalFn = Callable[[str, str | None], Any]         # (js, frame) -> evaluated value (frame None = top)
 
 
+# --- authoring reference -------------------------------------------------------
+# Single source for `<cli> reference`, kept beside the code that consumes them
+# (_do_action / _run_http / _build_context) and the statuses `run` returns.
+
+RULE_FIELDS: dict[str, str] = {
+    "id": "rule id (required, unique)",
+    "when": "the state id this rule applies in (a state signature's id)",
+    "do": "one action ({ui|http|eval}) or a list of them, run in order",
+    "expect": "destination state id, or a list of acceptable ids; omit while still "
+              "discovering (a discovery step that just reports where it landed)",
+}
+UI_ACTION_FIELDS: dict[str, str] = {
+    "action": "click | type | navigate | paste",
+    "selector": "the element selector (CSS by default)",
+    "by": "css (default) | xpath",
+    "value": "text to type, or URL to navigate to",
+    "frame": "frame path to act inside, e.g. [0] or [0, 1]",
+    "settle": "seconds to wait after acting (let a SPA render)",
+    "wait_after": "instead of settle: wait until this selector is visible",
+    "wait_after_timeout": "seconds to wait for wait_after (default 10)",
+    "enter": "true → press Enter after typing",
+}
+HTTP_ACTION_FIELDS: dict[str, str] = {
+    "context": "{name: {eval: <js>[, frame]} | {url_regex: <re>[, group]}} — seed {vars}",
+    "requests": "list of {method, url, headers?, body?, only_if?, capture?}; {vars} are "
+                "templated in, capture:{var: jsonField} lifts a response field into the "
+                "context for later requests, only_if:'{a}==b' / '{a}!=b' gates a request",
+}
+EVAL_ACTION_FIELDS: dict[str, str] = {
+    "script": "JS to run in the page (a bare expression is auto-returned)",
+    "frame": "optional nested frame path to run inside",
+}
+RUN_STATUSES: dict[str, str] = {
+    "reached": "arrived at the goal state (--to)",
+    "done": "a terminal state with no further applicable rule (a real endpoint)",
+    "discovered": "a rule with no `expect` landed somewhere — add that state's signature",
+    "unexpected": "a rule ran but `expect` didn't match where we landed",
+    "stuck": "a matched non-terminal state has no applicable rule — encode one (carries context)",
+    "unknown": "no state matched — add or loosen a signature (carries near-miss context)",
+    "ambiguous": "more than one state matched — tighten signatures so exactly one wins",
+    "aborted": "a human declined a step",
+    "max_steps": "the safety step bound was hit",
+}
+
+
 def _template(value: str, ctx: dict[str, Any]) -> str:
     """Replace `{name}` with `ctx[name]`; unknown names are left as-is."""
     return _VAR.sub(lambda m: str(ctx.get(m.group(1), m.group(0))), value)

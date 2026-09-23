@@ -1007,6 +1007,19 @@ class BrowserSession:
         )
         return result
 
+    # --- session cookies (for out-of-band, server-side downloads) ---
+    #
+    # An in-page `fetch` of a file link is CORS-blocked when the LMS 302s to a
+    # cross-origin signed-storage host (the browser can't read the opaque response).
+    # The way through is to pull the browser's cookies (including HttpOnly ones,
+    # which `document.cookie` can't see — only the WebDriver can) and replay the
+    # download from the server with an ordinary HTTP client, which isn't subject to
+    # CORS. Returns Selenium's cookie dicts (name/value/domain/path/…).
+    async def get_cookies(self) -> list[dict[str, Any]]:
+        """Return the live browser's cookies (incl. HttpOnly) for the current site."""
+        driver = await self._ready()
+        return await asyncio.to_thread(driver.get_cookies)
+
     # --- in-page JS eval (discovery/introspection) ---
     #
     # Run arbitrary JS in the top document and return its (JSON-able) result — the
