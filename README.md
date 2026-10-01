@@ -1,116 +1,190 @@
 # webwalk
 
-A test harness that drives a Selenium browser through a web flow and **observes
-where it is** to decide what to do next — so a flow can be resumed from the
-beginning *or* the middle. It captures what it sees so a flow can be codified into
+A harness that drives a Selenium browser through a web flow and **observes where
+it is** to decide what to do next — so a flow can be resumed from the beginning
+*or* the middle. It captures what it sees so a flow can be codified into
 **rules**, then *walked* autonomously: observe → match state → act → verify.
 
-`webwalk` is the **flow-agnostic core** (the browser session, the observe/act
-primitives, the rule engine). A **flow** teaches it one particular site: its
-state signatures, rules, and any specialized handlers. Each flow ships its own
-CLI. The first flow is **Secure Code Warrior** (`scw-sim`); `example` is a
-template to copy for the next one.
+webwalk is a **library plus a tool**. It holds the *mechanics* — the browser
+session, the observe/act primitives, the rule engine, the knowledge-graph
+exporter — and knows nothing about any particular site. The *knowledge* of a site
+(what its pages look like, how to move between them, what its API returns) lives
+in a **flow**, normally in its own repo that depends on webwalk.
+
+```
+   webwalk                          ww-<yourflow>  (a separate repo)
+   ───────                          ─────────────
+   browser session (server)         flow.yaml          the manifest
+   observe / act primitives         data/states.yaml   state signatures + rules
+   rule engine (where / run)        data/model.yaml    endpoints + entities
+   graph exporter (graph)           <pkg>/cli.py       run_flow_cli(FLOW)
+   core CLI verbs                   <pkg>/…            optional plugins
+                                    graphs/<id>/       the generated graph
+          ▲                                  │
+          └──────── depends on ──────────────┘
+```
 
 ## Architecture
 
 ```
    your machine (client)                        target machine (server)
    ─────────────────────         HTTP           ────────────────────────
-   webwalk  <verb>      ───────────────────▶    webwalk  serve   (or a flow's
-   scw-sim  <verb>                              (FastAPI; owns ONE live         serve)
-   (stateless CLIs)                              Selenium browser in memory)
-   engine / matcher / runner                     └─ observe · act · telemetry
+   <flow-cli> <verb>    ───────────────────▶    <flow-cli> serve
+   (stateless CLI;                              (FastAPI; owns ONE live
+    engine / matcher / runner)                   Selenium browser in memory)
+                                                 └─ observe · act · telemetry
 ```
 
 - The **server** runs on the machine that has the browser and can reach the site.
-  It owns a single long-lived Chrome (a **persistent profile**, so the logged-in
+  It owns a single long-lived Chrome (a **persistent profile**, so a logged-in
   session survives restarts). One process, all live state in memory.
-- The **CLIs** are stateless: one HTTP request per invocation. They run anywhere
-  on the LAN and find the server via `WW_SERVER`.
-- The core is **flow-agnostic**. A flow extends it two ways: **sub-flows** in the
-  engine (a "one level down" activity like a mission's step checklist) and
-  **server plugins** (a snapshot observer + endpoints, e.g. SCW's challenge
-  scraper). Neither is baked into the core.
+- The **CLI** is stateless: one HTTP request per invocation. It runs anywhere on
+  the LAN and finds the server via `WW_SERVER`.
+- Every flow CLI is the **core CLI plus that flow**: all the browser verbs
+  (`connect`, `observe`, `step`, …), the generic flow verbs (`where`, `run`,
+  `graph`) bound to the flow, and whatever extra verbs the flow registers. The
+  bare `webwalk` CLI has the same verbs but takes `--flow <id|path>`.
 
-Modeled on the sibling repos `../ebb-agent-data-access` and `../finmap` (same
-stateless-CLI / live-session-server split).
+## Writing a flow (webwalk as a dependency)
 
-## Flows and their CLIs
+The canonical layout — this is how
+[`ww-kg-chem3102`](../ww-kg-chem3102) is put together:
 
-| CLI | Flow | Adds on top of the core verbs |
-|---|---|---|
-| `webwalk` | *(none — the bare core)* | just the flow-agnostic browser verbs |
-| `scw-sim` | Secure Code Warrior | `run` walker, `where`, `mission`, `challenge` |
-| `example-sim` | template | `run`, `where` (copy it to start a new flow) |
+```
+ww-<yourflow>/
+  flow.yaml              the manifest: id, data files, optional plugins
+  data/
+    states.yaml          state signatures + rules        ("where to find it")
+    model.yaml           services + endpoints + entities ("what it is")  — optional
+    *.yaml               anything else your plugins read                 — optional
+  ww_<yourflow>/
+    __init__.py          FLOW = load_flow(<repo root>)
+    cli.py               main() → run_flow_cli(FLOW)
+    cli_ext.py           extra CLI verbs                                 — optional
+  graphs/<id>/           generated by `<cli> graph`; commit it
+  tests/
+  pyproject.toml
+```
 
-Every flow CLI includes **all** the core browser verbs (connect / observe / step
-/ …) plus its own `serve` that loads that flow's server plugins. So for SCW you
-can drive everything through `scw-sim`; `webwalk` is the bare tool for a new flow
-before it has any rules.
+### 1. `pyproject.toml` — depend on webwalk, expose a CLI
 
-### Adding a flow
+```toml
+[project]
+name = "ww-yourflow"
+dependencies = ["webwalk"]
 
-A flow is described by a **`flow.yaml` manifest** naming its knowledge (data
-files) and, optionally, its code plugins (dotted paths). It can live **in a
-separate repo** with webwalk as a dependency — the tool and the site-knowledge
-stay apart (modeled on `../knowledge-graph-editor` / its demo repo). See
-`webwalk/flow.py` and the `../ww-kg-clover` worked example.
+[project.scripts]
+yourflow = "ww_yourflow.cli:main"
 
-- **Pure-data flow** — a `flow.yaml` + `data/states.yaml`, no Python. webwalk's
-  generic verbs (`where` / `run` / `graph`) work over it directly:
+# Co-develop against a sibling checkout; for a standalone install use
+#   webwalk = { git = "https://github.com/MatrixManAtYrService/webwalk" }
+[tool.uv.sources]
+webwalk = { path = "../webwalk", editable = true }
+```
 
-  ```bash
-  webwalk --flow ./path/to/flow run       # or `--flow <id>` once installed
-  ```
+Optionally also register the flow so the bare tool can find it once installed
+(`webwalk --flow yourflow …`):
 
-- **Code flow** — the manifest also names plugins (a `SubFlow` factory, an
-  `observers.py` server plugin, extra CLI verbs). Ship it as its own repo:
-  1. `flow.yaml` (`id`, `data:`, and a `plugins:` block).
-  2. `pyproject.toml` depending on `webwalk` (via `[tool.uv.sources]`), a
-     `<flow>-sim` console script → `run_flow_cli(FLOW)`, and a `webwalk.flows`
-     entry point so `webwalk --flow <id>` finds it.
-  3. Author `data/states.yaml` by driving the browser (`connect`,
-     `observe --brief`, then encode what you did as a rule).
+```toml
+[project.entry-points."webwalk.flows"]
+yourflow = "ww_yourflow:FLOW"
+```
 
-  SCW (`webwalk/flows/scw/`, exposed as `FLOW`) is the worked example of both the
-  sub-flow factory and the server plugin; `../ww-kg-clover` reuses those mechanics
-  from an external repo while owning the knowledge.
+### 2. `flow.yaml` — the manifest
 
-### Knowledge-graph capture
+```yaml
+id: yourflow
+description: What this flow walks and what it captures.
+api_hosts: [api.example.com]        # filters the network view to the site's own API
 
-`<cli> graph` (or `webwalk --flow <id> graph`) projects the flow into the on-disk
-format the sibling **knowledge-graph-editor** (kge) reads — `schema.json` /
-`nodes.json` / `edges.json` under `graphs/<flow>/` — in up to two layers:
+data:                               # paths relative to this file
+  states: data/states.yaml          # required
+  model: data/model.yaml            # optional: the data-model graph layer
+  # …any other files your plugins read; they show up as flow.data["<key>"]
 
-- **state layer** ("where to find it"), from `states.yaml`: a `page` node per
-  state, a `NAVIGATES_TO`/`DISCOVERS` edge per rule.
-- **data-model layer** ("what it is"), from an optional `data/model.yaml`:
-  `service`/`endpoint`/`entity` nodes and the relationships between them (the API
-  a flow talks to and the domain objects it yields). See `webwalk/graph/model.py`.
+plugins:                            # omit entirely for a pure-data flow
+  cli: ww_yourflow.cli_ext:register_cli         # (app, flow) -> None
+  subflows: ww_yourflow.subflows:build_subflows # (flow, callbacks, window) -> [SubFlow]
+  server: ww_yourflow.observers                 # module the server imports at start
+```
 
-Each layer clobbers only its **own** node/edge *families*, so they compose in one
-graph and re-running `graph` never disturbs the other layer — or anything you
-curate in kge (add nodes/edges of a new type and they persist). See `webwalk/graph/`.
+### 3. The package — two tiny files
 
-## Quick start (SCW)
+```python
+# ww_yourflow/__init__.py
+from pathlib import Path
+from webwalk import load_flow
+
+FLOW = load_flow(Path(__file__).resolve().parent.parent)   # the repo root's flow.yaml
+```
+
+```python
+# ww_yourflow/cli.py
+from webwalk import run_flow_cli
+from ww_yourflow import FLOW
+
+def main() -> None:
+    run_flow_cli(FLOW)
+```
+
+That's a complete flow. With no `plugins:` block it's **pure data** — `where`,
+`run` and `graph` work over `states.yaml` / `model.yaml` with no Python of your
+own.
+
+### 4. Plugins — only when data isn't enough
+
+A flow grows code only where it needs behavior the rule engine doesn't have:
+
+- **`plugins.cli`** — extra verbs. A `register_cli(app, flow)` that adds Typer
+  commands to the flow's app; they can call the live server through the same
+  endpoints the core verbs use. `ww-kg-chem3102` adds `locks`, `pull`,
+  `readings` and `assessments` this way, fanned out from one `cli_ext.py`.
+- **`plugins.subflows`** — "one level down" activities inside a single page state
+  (a checklist, a quiz, a form to fill), triggered when a rule's `do` names
+  them. See `webwalk/engine/subflow.py` for the `SubFlow` contract.
+- **`plugins.server`** — a module the *server* imports at startup. It can
+  `register_snapshot_extension(key, extractor)` to fold extra data into every
+  `observe`, and add endpoints to `flow_router`. See `webwalk/server/plugins.py`.
+
+Everything a flow imports is re-exported from the top-level `webwalk` package
+(`Flow`, `load_flow`, `run_flow_cli`, `build_app`, `SubFlow`,
+`register_snapshot_extension`, `flow_router`, the graph builders, …).
+
+### Flow discovery
+
+`--flow <value>` on the bare `webwalk` CLI accepts a path to a `flow.yaml` (or
+its directory), or an id found by discovery: installed `webwalk.flows` entry
+points, then on-disk manifests in `$WEBWALK_FLOWS`, `./flow.yaml` and
+`./flows/*/flow.yaml`. **Local wins** — an on-disk flow overrides an installed
+one with the same id, so the repo you're standing in expresses intent.
+
+## Quick start
+
+From your flow's repo (substitute your CLI name for `yourflow`):
 
 ```bash
 # on the target machine
-uv run scw-sim serve                             # binds 0.0.0.0:22133, loads the SCW plugin
+uv run yourflow serve                    # binds 0.0.0.0:22133, loads the flow's server plugin
 
 # on your machine
 export WW_SERVER=http://<target-host>:22133
-uv run scw-sim check                             # {"healthy": true}
-uv run scw-sim connect https://…                 # opens the browser on the target
+uv run yourflow check                    # {"healthy": true}
+uv run yourflow onboarding               # read first: how to capture a flow as a graph
+uv run yourflow connect https://…        # opens the browser on the target
 #   … complete login/MFA by hand in that window …
-uv run scw-sim telemetry on                      # start recording
-uv run scw-sim where                             # which known course-state are we in?
-uv run scw-sim run --once                        # take one walk step (confirm first)
-uv run scw-sim run -y --brief                    # walk autonomously, compact output
+uv run yourflow telemetry on             # start recording
+uv run yourflow observe --brief          # what's on the page right now?
+uv run yourflow where                    # which known state are we in?
+uv run yourflow run --once               # take one walk step (confirm first)
+uv run yourflow run -y --brief           # walk autonomously, compact output
+uv run yourflow graph                    # (re)write graphs/<id>/
 ```
 
-`login.nu` is a worked example: it drives the Fiserv → Secure Code Warrior login
-end-to-end (pausing once for the human MFA code) and lands on the course.
+The authoring loop is: drive the browser by hand (`click`, `type`, `step`),
+`observe --brief` to see what's stable on each page, encode it as a state and the
+move as a rule in `data/states.yaml`, confirm with `where` / `run --once`, and
+record each API you hit as an endpoint in `data/model.yaml`. `reference` prints
+the exact states/rules/actions schema straight from the engine.
 
 ## Core concepts
 
@@ -119,19 +193,18 @@ end-to-end (pausing once for the human MFA code) and lands on the course.
 Auth is done by hand and must **not** be captured. Telemetry starts **OFF**:
 `connect`, log in and load the site in the headed window (nothing is observed),
 then `telemetry on`. Off means the observer simply doesn't look — it never
-records-then-discards, so credentials can't leak into the capture log. The
-password step additionally supports `--secret` (redacted everywhere) and `--env`
-(value from an env var, out of shell history).
+records-then-discards, so credentials can't leak into the capture log. Typing
+into a password field additionally supports `--secret` (redacted everywhere) and
+`--env` (value from an env var, out of shell history).
 
 ### Captures
 
 `observe` and `step` capture full page state — url, title, the interactive
 elements, the visible text of each nested frame, open windows, the **network
-traffic** the step produced (see below), and any **flow snapshot extensions**
-(e.g. SCW folds a `challenge` decision view in). Interactive elements include
-hidden **checkbox/radio** state (`checked` plus a nearby `label`), so
-step-completion boxes are readable even when the real input is visually hidden.
-Captures are:
+traffic** the step produced (see below), and any **snapshot extensions** a flow's
+server plugin registers. Interactive elements include hidden **checkbox/radio**
+state (`checked` plus a nearby `label`), so visually-hidden inputs are still
+readable. Captures are:
 
 - written server-side to `$TS_DATA_DIR/captures/` **only while telemetry is on**;
 - fetched back over HTTP and written **locally** to `./data/captures/` for easy
@@ -154,11 +227,12 @@ ring-buffered; tune with the `TS_NETWORK_*` env vars. See
 Selenium only ever sees the one window/frame it's focused on.
 
 - **Windows/tabs:** `windows` lists them; `--window <index|latest|first|substr>`
-  targets one. New tabs (e.g. "launch course") are not followed automatically.
+  targets one. New tabs are not followed automatically.
 - **Frames/iframes:** `observe` recurses into nested iframes; every element
   carries a `frame` path (`[]` = top, `[0]`, `[3,1]` = nested), and every frame
   entry carries its visible `text`. Actions take `--frame "3/1"` to act inside a
-  frame. Course content lives behind frames, so this matters constantly.
+  frame. Embedded content (players, editors, LMS packages) often lives behind
+  frames, so this matters a lot.
 
 ### Selectors, settling, clicking, errors
 
@@ -174,25 +248,38 @@ Selenium only ever sees the one window/frame it's focused on.
 
 ## The engine
 
-A flow is described by plain-data **state signatures** and **rules** in its
-`data/states.yaml`:
+A flow's `data/states.yaml` holds plain-data **state signatures** and **rules**:
 
 - A **state** recognizes "where we are" from an `observe` payload (url/title
   substrings + element predicates by frame/text/id/href). `<cli> where` reports
   the matching state(s).
-- A **rule** is `when` (a state) + `do` (a `ui`/`http`/`eval` action) + `expect`
-  (the destination state; omit while still discovering it). `<cli> run` walks the
-  graph: observe → match → act → verify → repeat, from any starting point (a
-  half-finished flow resumes rather than restarts), preferring the API where a
-  captured request shape exists and falling back to the UI.
-
-**Sub-flows** handle a repeated activity one level down from page states — for SCW
-that's a mission's step checklist, a challenge decision, or a coding-lab paste.
-They're pluggable (`webwalk/engine/subflow.py`): the core dispatches to whichever
-sub-flow a rule's `do` names; the SCW ones live in `webwalk/flows/scw/subflows.py`.
+- A **rule** is `when` (a state) + `do` (a `ui`/`http`/`eval` action, or a
+  sub-flow) + `expect` (the destination state; omit while still discovering it).
+  `<cli> run` walks the graph: observe → match → act → verify → repeat, from any
+  starting point (a half-finished flow resumes rather than restarts), preferring
+  the API where a captured request shape exists and falling back to the UI.
 
 The endgame is proving a flow has **no dead ends** — every state can reach the
 end. See `docs/rule-runner-design.md` and the follow-on `docs/*-design.md`.
+
+## Knowledge-graph capture
+
+`<cli> graph` projects the flow into the on-disk format the sibling
+**knowledge-graph-editor** (kge) reads — `schema.json` / `nodes.json` /
+`edges.json` under `graphs/<id>/` — in up to two layers:
+
+- **state layer** ("where to find it"), from `states.yaml`: a `page` node per
+  state, a `NAVIGATES_TO`/`DISCOVERS` edge per rule.
+- **data-model layer** ("what it is"), from an optional `data/model.yaml`:
+  `service`/`endpoint`/`entity` nodes and the relationships between them (the API
+  a flow talks to and the domain objects it yields). See `webwalk/graph/model.py`.
+
+Each layer clobbers only its **own** node/edge *families*, so they compose in one
+graph and re-running `graph` never disturbs the other layer — or anything you (or
+a flow plugin) curate in kge: add nodes/edges of a new type and they persist.
+Add kge as a dev dependency of the flow repo and `uv run kge serve` finds
+`./graphs/<id>/`. Commit the graph like code; it's the durable, queryable form of
+the flow.
 
 ## Command reference
 
@@ -200,13 +287,14 @@ Core verbs (on every CLI): `onboarding` (read first — how to capture a flow as
 graph), `reference` (the exact states/rules/actions schema, from the engine),
 `serve`, `check`, `connect`, `telemetry on|off`, `status`,
 `windows`/`switch`, `observe [--save|--brief]`, `network`, `step`, `click`,
-`type`, `paste`, `wait-for`, `fetch`, `eval`, `shutdown`. Plus the flow verbs
-`where` / `run` / `graph` (take `--flow <id|dir>` on the bare `webwalk`). Actions share
-`--window`, `--frame`, `--by css|xpath`, `--settle`, `--wait-after[/-timeout]`,
-`--save`.
+`type`, `paste`, `wait-for`, `fetch`, `eval`, `shutdown`.
 
-SCW flow verbs (`scw-sim`): `run` (walk the course), `where` (which state),
-`mission` (step playbook), `challenge` (the current decision view).
+Flow verbs: `where`, `run`, `graph` — bound to the flow on a flow's CLI; on bare
+`webwalk` they take `--flow <id|path>`. Plus whatever the flow's `plugins.cli`
+adds.
+
+Actions share `--window`, `--frame`, `--by css|xpath`, `--settle`,
+`--wait-after[/-timeout]`, `--save`.
 
 ## Configuration
 
@@ -215,7 +303,8 @@ Env vars keep the `TS_` prefix for continuity (they predate the rename). Key one
 | Env var | Meaning | Default |
 |---|---|---|
 | `WW_SERVER` | Where the CLI finds the server | `http://localhost:22133` |
-| `WEBWALK_SERVER_PLUGINS` | Comma-sep flow server-plugin modules the server loads | *(set by each flow's `serve`)* |
+| `WEBWALK_FLOWS` | Extra dirs (`:`/`,`-separated) scanned for `flow.yaml` | *(empty)* |
+| `WEBWALK_SERVER_PLUGINS` | Comma-sep server-plugin modules the server loads | *(set by each flow's `serve`)* |
 | `TS_WEBDRIVER_URL` | Remote WebDriver / Grid endpoint; empty = local Chrome | *(empty)* |
 | `TS_START_URL` | URL `connect` opens by default | `about:blank` |
 | `TS_DATA_DIR` | Server-side captures + browser profile | `~/.local/share/trainee-sim` |
@@ -236,31 +325,18 @@ logged-in browser profile survives the rename.)
 
 ```
 webwalk/
-  cli/           core.py (browser verbs + register_core_commands), _shared.py
-                 (request/capture/brief helpers), _walk.py (the shared walk
-                 plumbing a flow's `run` reuses)
+  __init__.py    the public SDK a flow imports
+  flow.py        the Flow type, manifest loading, discovery, run_flow_cli
+  reference.py   the schema `reference` prints
+  cli/           core.py (browser verbs + build_app), _shared.py (request/capture/
+                 brief helpers), _walk.py (the walk plumbing behind `run`)
   engine/        matcher.py (where am I?), runner.py (the walk), subflow.py
                  (the pluggable "one level down" contract)
   server/        main.py (FastAPI), session.py (the Selenium session),
                  plugins.py (snapshot-extension + route registry), capture.py,
                  recorder.py, config.py, logging.py
-  flows/
-    scw/         cli.py (scw-sim), subflows.py (mission/challenge/coding-lab),
-                 observers.py (challenge server plugin), challenge.py/coding_lab.py/
-                 mission.py (pure handlers), data/*.yaml (states + answer keys)
-    example/     cli.py + data/states.yaml — the copy-me template
-tests/           test_runner.py (generic engine), test_scw_subflows.py (SCW
-                 sub-flows), test_challenge/mission/coding_lab/recorder.py
+  graph/         kge.py (state layer + writer), model.py (data-model layer)
+  flows/         flows bundled with webwalk itself; example/ is a minimal template
+tests/
 docs/            design docs (network-capture, rule-runner, reachability, …)
-login.nu         worked example: scripted SCW login
 ```
-
-## Status
-
-Working (validated end-to-end against the real Secure Code Warrior training): the
-client/server spine, telemetry gate, window + nested-frame handling, scriptable
-actions with settle/readable-errors, local capture fetch, gated network capture,
-the "where am I" state detector, and the **rule runner** — walking the state
-graph (UI or API) from any starting point, with the SCW mission / challenge /
-coding-lab sub-flows. The core is now flow-agnostic, with SCW as the first flow
-behind `scw-sim` and `example` as the template for the next.
